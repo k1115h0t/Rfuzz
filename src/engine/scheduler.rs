@@ -1,0 +1,847 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+
+use crate::config::{Config, FuzzMode, ScheduleMode};
+use crate::engine::precheck::{self, PrecheckSkipper};
+use crate::engine::progress::{ErrorKind, ProgressReporter};
+use crate::engine::rate_limiter::RateLimiter;
+use crate::engine::worker;
+use crate::http::client;
+use crate::http::client::build_client;
+use crate::input::modes::{
+    clusterbomb, clusterbomb_ordered, clusterbomb_rotate_window, pitchfork, InputCase, InputCases,
+    ScopeCases,
+};
+use crate::input::wordlist::{load_wordlists, WordlistLoadOptions};
+use crate::output::{
+    build_writer, error_log::build_error_logger, error_log::ErrorLogger, raw::save_raw_exchange,
+    OutputRecord, RawExchange,
+};
+
+pub async fn run(config: Config) -> Result<()> {
+    if config.future.auto_calibration.enabled {
+        tracing::warn!(
+            "auto-calibration flags are reserved for v0.2 and are not implemented in v0.1"
+        );
+    }
+
+    let wordlists = load_wordlists(
+        &config.input.wordlists,
+        &WordlistLoadOptions {
+            ignore_comments: config.input.ignore_wordlist_comments,
+            extensions: config.input.extensions.clone(),
+        },
+    )?;
+    let client = build_client(&config.request)?;
+    let precheck_skipper = precheck::run(&config, &wordlists, client.clone()).await?;
+
+    let mut cases = match config.input.mode {
+        FuzzMode::Sniper => {
+            tracing::warn!("sniper mode is reserved; using pitchfork behavior for v0.1");
+            pitchfork(wordlists, config.input.budget_requests)
+        }
+        FuzzMode::Pitchfork => pitchfork(wordlists, config.input.budget_requests),
+        FuzzMode::Clusterbomb => {
+            if config.execution.schedule.mode == ScheduleMode::RotateWindow {
+                let target_key = config
+                    .execution
+                    .schedule
+                    .target_key
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("-schedule rotate-window requires -target-key"))?;
+                clusterbomb_rotate_window(
+                    wordlists,
+                    target_key,
+                    config.execution.schedule.target_window,
+                    config.execution.schedule.target_burst,
+                    config.input.budget_requests,
+                )?
+            } else if config.input.order.is_empty() {
+                clusterbomb(wordlists, config.input.budget_requests)?
+            } else {
+                clusterbomb_ordered(wordlists, &config.input.order, config.input.budget_requests)?
+            }
+        }
+    };
+
+    if cases.is_empty() {
+        return Err(anyhow!("no input cases generated"));
+    }
+    let total_cases = cases.total();
+
+    let replay_client = if let Some(replay_proxy) = &config.request.replay_proxy {
+        let mut replay_config = config.request.clone();
+        replay_config.proxy = Some(replay_proxy.clone());
+        replay_config.replay_proxy = None;
+        Some(build_client(&replay_config)?)
+    } else {
+        None
+    };
+    let limiter = RateLimiter::new(config.execution.rate_per_sec);
+    let writer = Arc::new(Mutex::new(build_writer(&config.output)?));
+    let error_logger = Arc::new(Mutex::new(build_error_logger(
+        config.output.error_log.as_deref(),
+    )?));
+    let matcher = Arc::new(config.matcher.clone());
+    let progress = ProgressReporter::new(total_cases, config.output.progress);
+
+    if config.future.stop.stop_on_match.is_some() && !config.future.stop.stop_scope.is_empty() {
+        let result = if !config.input.order.is_empty() {
+            run_with_order_batches(
+                config,
+                cases,
+                client,
+                replay_client,
+                limiter,
+                writer,
+                error_logger.clone(),
+                matcher,
+                progress.clone(),
+                true,
+                precheck_skipper.clone(),
+            )
+            .await
+        } else if cases.scope_is_prefix(&config.future.stop.stop_scope) {
+            run_with_scoped_stop(
+                config,
+                cases,
+                client,
+                replay_client,
+                limiter,
+                writer,
+                error_logger.clone(),
+                matcher,
+                progress.clone(),
+                precheck_skipper.clone(),
+            )
+            .await
+        } else {
+            run_with_global_scoped_stop(
+                config,
+                cases,
+                client,
+                replay_client,
+                limiter,
+                writer,
+                error_logger.clone(),
+                matcher,
+                progress.clone(),
+                precheck_skipper.clone(),
+            )
+            .await
+        };
+        progress.finish();
+        let flush_result = flush_error_logger(error_logger).await;
+        return result.and(flush_result);
+    }
+
+    if !config.input.order.is_empty() {
+        let result = run_with_order_batches(
+            config,
+            cases,
+            client,
+            replay_client,
+            limiter,
+            writer,
+            error_logger.clone(),
+            matcher,
+            progress.clone(),
+            false,
+            precheck_skipper.clone(),
+        )
+        .await;
+        progress.finish();
+        let flush_result = flush_error_logger(error_logger).await;
+        return result.and(flush_result);
+    }
+
+    let mut join_set = JoinSet::new();
+    while join_set.len() < config.execution.concurrency {
+        let Some(input) = next_precheck_case(&mut cases, precheck_skipper.clone(), &progress)
+        else {
+            break;
+        };
+        spawn_case(
+            &mut join_set,
+            input,
+            client.clone(),
+            config.request.clone(),
+            limiter.clone(),
+            config.execution.delay,
+            config.input.encoders.clone(),
+            writer.clone(),
+            error_logger.clone(),
+            matcher.clone(),
+            replay_client.clone(),
+            config.output.output_directory.clone(),
+            progress.clone(),
+            None,
+        );
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        result??;
+        if let Some(input) = next_precheck_case(&mut cases, precheck_skipper.clone(), &progress) {
+            spawn_case(
+                &mut join_set,
+                input,
+                client.clone(),
+                config.request.clone(),
+                limiter.clone(),
+                config.execution.delay,
+                config.input.encoders.clone(),
+                writer.clone(),
+                error_logger.clone(),
+                matcher.clone(),
+                replay_client.clone(),
+                config.output.output_directory.clone(),
+                progress.clone(),
+                None,
+            );
+        }
+    }
+    progress.finish();
+    flush_error_logger(error_logger).await?;
+    Ok(())
+}
+
+fn next_precheck_case(
+    cases: &mut InputCases,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    progress: &ProgressReporter,
+) -> Option<InputCase> {
+    for input in cases.by_ref() {
+        if should_skip_precheck(&input, precheck_skipper.as_deref()) {
+            progress.record_skipped_by(1);
+        } else {
+            return Some(input);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_order_batches(
+    config: Config,
+    mut cases: InputCases,
+    client: reqwest::Client,
+    replay_client: Option<reqwest::Client>,
+    limiter: RateLimiter,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    progress: ProgressReporter,
+    enable_scope_stop: bool,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+) -> Result<()> {
+    let batch_scope = config.input.order[..config.input.order.len().saturating_sub(1)].to_vec();
+    let scope_stop = enable_scope_stop.then(|| {
+        Arc::new(Mutex::new(ScopeStopTracker::new(
+            config.future.stop.stop_scope.clone(),
+            config.future.stop.stop_on_match.unwrap_or(1),
+        )))
+    });
+
+    while let Some(mut batch_cases) = cases.next_scope(&batch_scope) {
+        let mut join_set = JoinSet::new();
+        while join_set.len() < config.execution.concurrency {
+            let Some(input) = next_unstopped_scope_case(
+                &mut batch_cases,
+                scope_stop.clone(),
+                precheck_skipper.clone(),
+                &progress,
+            )
+            .await
+            else {
+                break;
+            };
+            spawn_case(
+                &mut join_set,
+                input,
+                client.clone(),
+                config.request.clone(),
+                limiter.clone(),
+                config.execution.delay,
+                config.input.encoders.clone(),
+                writer.clone(),
+                error_logger.clone(),
+                matcher.clone(),
+                replay_client.clone(),
+                config.output.output_directory.clone(),
+                progress.clone(),
+                scope_stop.clone(),
+            );
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            result??;
+            if let Some(input) = next_unstopped_scope_case(
+                &mut batch_cases,
+                scope_stop.clone(),
+                precheck_skipper.clone(),
+                &progress,
+            )
+            .await
+            {
+                spawn_case(
+                    &mut join_set,
+                    input,
+                    client.clone(),
+                    config.request.clone(),
+                    limiter.clone(),
+                    config.execution.delay,
+                    config.input.encoders.clone(),
+                    writer.clone(),
+                    error_logger.clone(),
+                    matcher.clone(),
+                    replay_client.clone(),
+                    config.output.output_directory.clone(),
+                    progress.clone(),
+                    scope_stop.clone(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn next_unstopped_scope_case(
+    scope_cases: &mut ScopeCases,
+    scope_stop: Option<Arc<Mutex<ScopeStopTracker>>>,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    progress: &ProgressReporter,
+) -> Option<InputCase> {
+    for input in scope_cases.by_ref() {
+        if should_skip_precheck(&input, precheck_skipper.as_deref()) {
+            progress.record_skipped_by(1);
+            continue;
+        }
+        let skip = if let Some(scope_stop) = &scope_stop {
+            scope_stop.lock().await.should_skip(&input)
+        } else {
+            false
+        };
+        if skip {
+            progress.record_skipped_by(1);
+        } else {
+            return Some(input);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_case(
+    join_set: &mut JoinSet<Result<()>>,
+    input: InputCase,
+    client: reqwest::Client,
+    request_config: crate::config::RequestConfig,
+    limiter: RateLimiter,
+    delay: crate::engine::rate_limiter::DelayConfig,
+    encoders: crate::input::encoder::EncoderSet,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    replay_client: Option<reqwest::Client>,
+    output_directory: Option<String>,
+    progress: ProgressReporter,
+    scope_stop: Option<Arc<Mutex<ScopeStopTracker>>>,
+) {
+    join_set.spawn(async move {
+        match worker::execute_case(
+            client,
+            request_config,
+            limiter,
+            delay,
+            encoders,
+            input.clone(),
+        )
+        .await
+        {
+            Ok(result) => {
+                let elapsed_ms = result.response.signature.elapsed_ms;
+                let matched_input = result.input.clone();
+                match handle_match_result(
+                    result,
+                    matcher.as_ref(),
+                    writer,
+                    replay_client,
+                    output_directory,
+                )
+                .await
+                {
+                    Ok(matched) => {
+                        if matched {
+                            if let Some(scope_stop) = &scope_stop {
+                                scope_stop.lock().await.record_match(&matched_input);
+                            }
+                        }
+                        progress.record_response(matched, elapsed_ms);
+                    }
+                    Err(error) => {
+                        progress.record_error(ErrorKind::Other, 0);
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let kind = worker::classify_error(&error.error);
+                let elapsed_ms = error.elapsed_ms;
+                write_worker_error_log(error_logger, &error).await?;
+                progress.record_error(kind, elapsed_ms);
+                Ok(())
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_global_scoped_stop(
+    config: Config,
+    mut cases: InputCases,
+    client: reqwest::Client,
+    replay_client: Option<reqwest::Client>,
+    limiter: RateLimiter,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    progress: ProgressReporter,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+) -> Result<()> {
+    let max_hits = config.future.stop.stop_on_match.unwrap_or(1);
+    let scope_stop = Arc::new(Mutex::new(ScopeStopTracker::new(
+        config.future.stop.stop_scope.clone(),
+        max_hits,
+    )));
+    let mut join_set = JoinSet::new();
+    while join_set.len() < config.execution.concurrency {
+        let Some(input) = next_unstopped_case(
+            &mut cases,
+            scope_stop.clone(),
+            precheck_skipper.clone(),
+            &progress,
+        )
+        .await
+        else {
+            break;
+        };
+        spawn_case(
+            &mut join_set,
+            input,
+            client.clone(),
+            config.request.clone(),
+            limiter.clone(),
+            config.execution.delay,
+            config.input.encoders.clone(),
+            writer.clone(),
+            error_logger.clone(),
+            matcher.clone(),
+            replay_client.clone(),
+            config.output.output_directory.clone(),
+            progress.clone(),
+            Some(scope_stop.clone()),
+        );
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        result??;
+        if let Some(input) = next_unstopped_case(
+            &mut cases,
+            scope_stop.clone(),
+            precheck_skipper.clone(),
+            &progress,
+        )
+        .await
+        {
+            spawn_case(
+                &mut join_set,
+                input,
+                client.clone(),
+                config.request.clone(),
+                limiter.clone(),
+                config.execution.delay,
+                config.input.encoders.clone(),
+                writer.clone(),
+                error_logger.clone(),
+                matcher.clone(),
+                replay_client.clone(),
+                config.output.output_directory.clone(),
+                progress.clone(),
+                Some(scope_stop.clone()),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn next_unstopped_case(
+    cases: &mut InputCases,
+    scope_stop: Arc<Mutex<ScopeStopTracker>>,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    progress: &ProgressReporter,
+) -> Option<InputCase> {
+    for input in cases.by_ref() {
+        if should_skip_precheck(&input, precheck_skipper.as_deref()) {
+            progress.record_skipped_by(1);
+            continue;
+        }
+        if scope_stop.lock().await.should_skip(&input) {
+            progress.record_skipped_by(1);
+        } else {
+            return Some(input);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_scoped_stop(
+    config: Config,
+    mut cases: InputCases,
+    client: reqwest::Client,
+    replay_client: Option<reqwest::Client>,
+    limiter: RateLimiter,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    progress: ProgressReporter,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+) -> Result<()> {
+    let max_hits = config.future.stop.stop_on_match.unwrap_or(1);
+    let fast_precheck_skip_scope = precheck_skipper
+        .as_ref()
+        .is_some_and(|skipper| skipper.can_fast_skip_scope(&config.future.stop.stop_scope));
+    let mut join_set = JoinSet::new();
+    while join_set.len() < config.execution.concurrency {
+        let Some(scope_cases) = cases.next_scope(&config.future.stop.stop_scope) else {
+            break;
+        };
+        spawn_scope(
+            &mut join_set,
+            scope_cases,
+            max_hits,
+            client.clone(),
+            config.request.clone(),
+            limiter.clone(),
+            config.execution.delay,
+            config.input.encoders.clone(),
+            writer.clone(),
+            error_logger.clone(),
+            matcher.clone(),
+            replay_client.clone(),
+            config.output.output_directory.clone(),
+            progress.clone(),
+            precheck_skipper.clone(),
+            fast_precheck_skip_scope,
+        );
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        result??;
+        if let Some(scope_cases) = cases.next_scope(&config.future.stop.stop_scope) {
+            spawn_scope(
+                &mut join_set,
+                scope_cases,
+                max_hits,
+                client.clone(),
+                config.request.clone(),
+                limiter.clone(),
+                config.execution.delay,
+                config.input.encoders.clone(),
+                writer.clone(),
+                error_logger.clone(),
+                matcher.clone(),
+                replay_client.clone(),
+                config.output.output_directory.clone(),
+                progress.clone(),
+                precheck_skipper.clone(),
+                fast_precheck_skip_scope,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_scope(
+    join_set: &mut JoinSet<Result<()>>,
+    mut scope_cases: ScopeCases,
+    max_hits: usize,
+    client: reqwest::Client,
+    request_config: crate::config::RequestConfig,
+    limiter: RateLimiter,
+    delay: crate::engine::rate_limiter::DelayConfig,
+    encoders: crate::input::encoder::EncoderSet,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    replay_client: Option<reqwest::Client>,
+    output_directory: Option<String>,
+    progress: ProgressReporter,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    fast_precheck_skip_scope: bool,
+) {
+    join_set.spawn(async move {
+        let mut hits = 0usize;
+        while let Some(input) = scope_cases.next() {
+            if hits >= max_hits {
+                progress.record_skipped_by(1 + scope_cases.len_remaining());
+                break;
+            }
+            if should_skip_precheck(&input, precheck_skipper.as_deref()) {
+                let skipped = if fast_precheck_skip_scope {
+                    1 + scope_cases.len_remaining()
+                } else {
+                    1
+                };
+                progress.record_skipped_by(skipped);
+                if fast_precheck_skip_scope {
+                    break;
+                }
+                continue;
+            }
+
+            match worker::execute_case(
+                client.clone(),
+                request_config.clone(),
+                limiter.clone(),
+                delay,
+                encoders.clone(),
+                input.clone(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    let elapsed_ms = result.response.signature.elapsed_ms;
+                    let matched = handle_match_result(
+                        result,
+                        matcher.as_ref(),
+                        writer.clone(),
+                        replay_client.clone(),
+                        output_directory.clone(),
+                    )
+                    .await?;
+                    progress.record_response(matched, elapsed_ms);
+                    if matched {
+                        hits += 1;
+                    }
+                }
+                Err(error) => {
+                    let kind = worker::classify_error(&error.error);
+                    let elapsed_ms = error.elapsed_ms;
+                    write_worker_error_log(error_logger.clone(), &error).await?;
+                    progress.record_error(kind, elapsed_ms);
+                }
+            }
+        }
+        Ok(())
+    });
+}
+
+fn should_skip_precheck(input: &InputCase, precheck_skipper: Option<&PrecheckSkipper>) -> bool {
+    precheck_skipper.is_some_and(|skipper| skipper.should_skip(input))
+}
+
+async fn write_worker_error_log(
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    error: &worker::WorkerError,
+) -> Result<()> {
+    if let Some(logger) = error_logger.lock().await.as_mut() {
+        logger.write_case_error(&error.input, error.url.as_deref(), &error.error)?;
+    }
+    Ok(())
+}
+
+async fn flush_error_logger(error_logger: Arc<Mutex<Option<ErrorLogger>>>) -> Result<()> {
+    if let Some(logger) = error_logger.lock().await.as_mut() {
+        logger.flush()?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ScopeStopTracker {
+    keywords: Vec<String>,
+    max_hits: usize,
+    hits: HashMap<Vec<String>, usize>,
+}
+
+impl ScopeStopTracker {
+    fn new(keywords: Vec<String>, max_hits: usize) -> Self {
+        Self {
+            keywords,
+            max_hits,
+            hits: HashMap::new(),
+        }
+    }
+
+    fn should_skip(&self, input: &InputCase) -> bool {
+        if self.max_hits == 0 {
+            return true;
+        }
+        self.hits
+            .get(&self.key(input))
+            .is_some_and(|hits| *hits >= self.max_hits)
+    }
+
+    fn record_match(&mut self, input: &InputCase) {
+        *self.hits.entry(self.key(input)).or_default() += 1;
+    }
+
+    fn key(&self, input: &InputCase) -> Vec<String> {
+        self.keywords
+            .iter()
+            .map(|keyword| input.values.get(keyword).cloned().unwrap_or_default())
+            .collect()
+    }
+}
+
+async fn handle_match_result(
+    result: worker::WorkerResult,
+    matcher: &crate::matcher::legacy::MatcherConfig,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    replay_client: Option<reqwest::Client>,
+    output_directory: Option<String>,
+) -> Result<bool> {
+    if !matcher.should_output(&result.response.signature, &result.response.raw) {
+        return Ok(false);
+    }
+
+    let raw = RawExchange {
+        request: result.request_raw,
+        response: result.response.raw.clone(),
+    };
+    let record = OutputRecord::new(
+        result.url,
+        result.input.display,
+        result.input.values,
+        &result.response.signature,
+    );
+    if let Some(dir) = output_directory {
+        let _ = save_raw_exchange(&dir, &record, &raw)?;
+    }
+    writer.lock().await.write_record(&record, Some(&raw))?;
+    if let Some(replay_client) = replay_client {
+        let _ = client::execute(&replay_client, result.rendered_request).await;
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    use regex::Regex;
+
+    use super::*;
+    use crate::http::request::RenderedRequest;
+    use crate::http::response::ResponseSummary;
+    use crate::input::modes::InputCase;
+    use crate::matcher::legacy::MatcherConfig;
+    use crate::matcher::signature::ResponseSignature;
+    use crate::output::{OutputRecord, ResultWriter};
+
+    struct CollectingWriter {
+        records: StdArc<StdMutex<Vec<OutputRecord>>>,
+    }
+
+    impl ResultWriter for CollectingWriter {
+        fn write_record(
+            &mut self,
+            record: &OutputRecord,
+            _raw: Option<&crate::output::RawExchange>,
+        ) -> Result<()> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn regex_matcher_checks_complete_raw_response() {
+        let records = StdArc::new(StdMutex::new(Vec::new()));
+        let writer: Arc<Mutex<Box<dyn ResultWriter>>> =
+            Arc::new(Mutex::new(Box::new(CollectingWriter {
+                records: records.clone(),
+            })));
+        let matcher = MatcherConfig {
+            match_regex: vec![Regex::new("Set-Cookie: 3x-ui=").unwrap()],
+            ..MatcherConfig::default()
+        };
+        let result = worker::WorkerResult {
+            input: InputCase {
+                values: BTreeMap::from([("FUZZ".to_string(), "admin".to_string())]),
+                display: "admin".to_string(),
+            },
+            url: "https://example.com/login".to_string(),
+            request_raw: "POST /login HTTP/1.1\r\n\r\n".to_string(),
+            rendered_request: RenderedRequest {
+                method: reqwest::Method::POST,
+                url: "https://example.com/login".to_string(),
+                headers: Vec::new(),
+                body: None,
+                raw: "POST /login HTTP/1.1\r\n\r\n".to_string(),
+            },
+            response: ResponseSummary {
+                signature: ResponseSignature {
+                    status: 200,
+                    size: 2,
+                    words: 1,
+                    lines: 1,
+                    elapsed_ms: 10,
+                    location: None,
+                    title: None,
+                    body_hash: 0,
+                },
+                raw: "HTTP/1.1 200\r\nSet-Cookie: 3x-ui=abc\r\n\r\nok".to_string(),
+            },
+        };
+
+        let matched = handle_match_result(result, &matcher, writer, None, None)
+            .await
+            .unwrap();
+
+        assert!(matched);
+        assert_eq!(records.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scope_stop_tracker_skips_non_contiguous_scopes_after_match() {
+        let mut tracker = ScopeStopTracker::new(vec!["URLFUZZ".to_string()], 1);
+        let url1_first = InputCase {
+            values: BTreeMap::from([
+                ("URLFUZZ".to_string(), "url1".to_string()),
+                ("UFUZZ".to_string(), "alice".to_string()),
+                ("PFUZZ".to_string(), "p1".to_string()),
+            ]),
+            display: "URLFUZZ=url1,UFUZZ=alice,PFUZZ=p1".to_string(),
+        };
+        let url2 = InputCase {
+            values: BTreeMap::from([
+                ("URLFUZZ".to_string(), "url2".to_string()),
+                ("UFUZZ".to_string(), "alice".to_string()),
+                ("PFUZZ".to_string(), "p1".to_string()),
+            ]),
+            display: "URLFUZZ=url2,UFUZZ=alice,PFUZZ=p1".to_string(),
+        };
+        let url1_later = InputCase {
+            values: BTreeMap::from([
+                ("URLFUZZ".to_string(), "url1".to_string()),
+                ("UFUZZ".to_string(), "alice".to_string()),
+                ("PFUZZ".to_string(), "p2".to_string()),
+            ]),
+            display: "URLFUZZ=url1,UFUZZ=alice,PFUZZ=p2".to_string(),
+        };
+
+        assert!(!tracker.should_skip(&url1_first));
+        tracker.record_match(&url1_first);
+        assert!(!tracker.should_skip(&url2));
+        assert!(tracker.should_skip(&url1_later));
+    }
+}
