@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -59,14 +61,17 @@ jobs:
             os: ubuntu-latest
             binary: target/release/rfuzz
             artifact: rfuzz-linux
+            archive: rfuzz-linux.tar.gz
           - name: Windows
             os: windows-latest
             binary: target/release/rfuzz.exe
             artifact: rfuzz-windows
+            archive: rfuzz-windows.zip
           - name: macOS
             os: macos-latest
             binary: target/release/rfuzz
             artifact: rfuzz-macos
+            archive: rfuzz-macos.tar.gz
 
     steps:
       - name: Checkout
@@ -92,9 +97,61 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Upload binary
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.binary }}" dist/rfuzz
+          tar -czf "${{ matrix.archive }}" -C dist rfuzz
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item "${{ matrix.binary }}" "dist/rfuzz.exe"
+          Compress-Archive -Path "dist/rfuzz.exe" -DestinationPath "${{ matrix.archive }}" -Force
+
+      - name: Upload binary package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.binary }}
+          path: ${{ matrix.archive }}
           if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Check release notes
+        run: |
+          notes_path="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_path" ]; then
+            echo "Missing release notes: $notes_path"
+            echo "Create this file before pushing the tag."
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          files: |
+            dist/**/rfuzz-linux.tar.gz
+            dist/**/rfuzz-macos.tar.gz
+            dist/**/rfuzz-windows.zip
