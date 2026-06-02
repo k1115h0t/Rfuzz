@@ -60,6 +60,10 @@ impl OutputRecord {
 
 pub trait ResultWriter: Send {
     fn write_record(&mut self, record: &OutputRecord, raw: Option<&RawExchange>) -> Result<()>;
+
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub fn build_writer(config: &OutputConfig) -> Result<Box<dyn ResultWriter>> {

@@ -50,14 +50,14 @@ pub fn build_client(config: &RequestConfig) -> Result<Client> {
     builder.build().context("failed to build HTTP client")
 }
 
-pub async fn execute(client: &Client, request: RenderedRequest) -> Result<ResponseSummary> {
+pub async fn execute(client: &Client, request: &RenderedRequest) -> Result<ResponseSummary> {
     let started = Instant::now();
-    let mut builder = client.request(request.method, &request.url);
-    for (name, value) in request.headers {
+    let mut builder = client.request(request.method.clone(), &request.url);
+    for (name, value) in &request.headers {
         builder = builder.header(name.as_str(), value);
     }
-    if let Some(body) = request.body {
-        builder = builder.body(body);
+    if let Some(body) = &request.body {
+        builder = builder.body(body.clone());
     }
 
     let response = builder.send().await?;

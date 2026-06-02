@@ -30,6 +30,10 @@ impl ResultWriter for ConsoleWriter {
                 record.input, record.status, record.size, record.words, record.lines
             )?;
         }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())
     }

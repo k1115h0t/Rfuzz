@@ -134,6 +134,10 @@ impl MatcherConfig {
             || !self.match_regex.is_empty()
     }
 
+    pub fn uses_response_body(&self) -> bool {
+        !self.match_regex.is_empty() || !self.filter_regex.is_empty()
+    }
+
     fn is_filtered(&self, signature: &ResponseSignature, body: &str) -> bool {
         let checks = [
             self.filter_status
@@ -202,13 +206,13 @@ fn combine<I>(checks: I, mode: SetMode) -> bool
 where
     I: IntoIterator<Item = bool>,
 {
-    let checks = checks.into_iter().collect::<Vec<_>>();
-    if checks.is_empty() {
+    let mut checks = checks.into_iter().peekable();
+    if checks.peek().is_none() {
         return false;
     }
     match mode {
-        SetMode::Or => checks.into_iter().any(|value| value),
-        SetMode::And => checks.into_iter().all(|value| value),
+        SetMode::Or => checks.any(|value| value),
+        SetMode::And => checks.all(|value| value),
     }
 }
 

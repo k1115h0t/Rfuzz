@@ -98,12 +98,10 @@ fn normalize_url(url: &str, raw_uri: bool) -> String {
     if raw_uri {
         return url.to_string();
     }
-    url.chars()
-        .flat_map(|ch| match ch {
-            ' ' => "%20".chars().collect::<Vec<_>>(),
-            _ => vec![ch],
-        })
-        .collect()
+    if !url.contains(' ') {
+        return url.to_string();
+    }
+    url.replace(' ', "%20")
 }
 
 fn build_raw_request(

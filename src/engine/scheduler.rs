@@ -97,7 +97,7 @@ pub async fn run(config: Config) -> Result<()> {
                 client,
                 replay_client,
                 limiter,
-                writer,
+                writer.clone(),
                 error_logger.clone(),
                 matcher,
                 progress.clone(),
@@ -112,7 +112,7 @@ pub async fn run(config: Config) -> Result<()> {
                 client,
                 replay_client,
                 limiter,
-                writer,
+                writer.clone(),
                 error_logger.clone(),
                 matcher,
                 progress.clone(),
@@ -126,7 +126,7 @@ pub async fn run(config: Config) -> Result<()> {
                 client,
                 replay_client,
                 limiter,
-                writer,
+                writer.clone(),
                 error_logger.clone(),
                 matcher,
                 progress.clone(),
@@ -135,8 +135,9 @@ pub async fn run(config: Config) -> Result<()> {
             .await
         };
         progress.finish();
+        let writer_flush_result = flush_writer(writer).await;
         let flush_result = flush_error_logger(error_logger).await;
-        return result.and(flush_result);
+        return result.and(writer_flush_result).and(flush_result);
     }
 
     if !config.input.order.is_empty() {
@@ -146,7 +147,7 @@ pub async fn run(config: Config) -> Result<()> {
             client,
             replay_client,
             limiter,
-            writer,
+            writer.clone(),
             error_logger.clone(),
             matcher,
             progress.clone(),
@@ -155,8 +156,9 @@ pub async fn run(config: Config) -> Result<()> {
         )
         .await;
         progress.finish();
+        let writer_flush_result = flush_writer(writer).await;
         let flush_result = flush_error_logger(error_logger).await;
-        return result.and(flush_result);
+        return result.and(writer_flush_result).and(flush_result);
     }
 
     let mut join_set = JoinSet::new();
@@ -205,6 +207,7 @@ pub async fn run(config: Config) -> Result<()> {
         }
     }
     progress.finish();
+    flush_writer(writer).await?;
     flush_error_logger(error_logger).await?;
     Ok(())
 }
@@ -665,6 +668,10 @@ async fn flush_error_logger(error_logger: Arc<Mutex<Option<ErrorLogger>>>) -> Re
     Ok(())
 }
 
+async fn flush_writer(writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>) -> Result<()> {
+    writer.lock().await.flush()
+}
+
 #[derive(Debug)]
 struct ScopeStopTracker {
     keywords: Vec<String>,
@@ -703,19 +710,27 @@ impl ScopeStopTracker {
 }
 
 async fn handle_match_result(
-    result: worker::WorkerResult,
+    mut result: worker::WorkerResult,
     matcher: &crate::matcher::legacy::MatcherConfig,
     writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
     replay_client: Option<reqwest::Client>,
     output_directory: Option<String>,
 ) -> Result<bool> {
-    if !matcher.should_output(&result.response.signature, &result.response.raw) {
+    let matched = if matcher.uses_response_body() {
+        let (signature, raw) = result.response.signature_and_raw_response();
+        matcher.should_output(signature, raw)
+    } else {
+        matcher.should_output(&result.response.signature, "")
+    };
+    if !matched {
         return Ok(false);
     }
 
+    result.response.ensure_title();
+    let response_raw = result.response.raw_response().to_string();
     let raw = RawExchange {
         request: result.request_raw,
-        response: result.response.raw.clone(),
+        response: response_raw,
     };
     let record = OutputRecord::new(
         result.url,
@@ -728,7 +743,7 @@ async fn handle_match_result(
     }
     writer.lock().await.write_record(&record, Some(&raw))?;
     if let Some(replay_client) = replay_client {
-        let _ = client::execute(&replay_client, result.rendered_request).await;
+        let _ = client::execute(&replay_client, &result.rendered_request).await;
     }
     Ok(true)
 }
@@ -788,8 +803,8 @@ mod tests {
                 body: None,
                 raw: "POST /login HTTP/1.1\r\n\r\n".to_string(),
             },
-            response: ResponseSummary {
-                signature: ResponseSignature {
+            response: ResponseSummary::from_parts(
+                ResponseSignature {
                     status: 200,
                     size: 2,
                     words: 1,
@@ -799,8 +814,8 @@ mod tests {
                     title: None,
                     body_hash: 0,
                 },
-                raw: "HTTP/1.1 200\r\nSet-Cookie: 3x-ui=abc\r\n\r\nok".to_string(),
-            },
+                "HTTP/1.1 200\r\nSet-Cookie: 3x-ui=abc\r\n\r\nok".to_string(),
+            ),
         };
 
         let matched = handle_match_result(result, &matcher, writer, None, None)

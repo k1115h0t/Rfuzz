@@ -22,6 +22,10 @@ impl ResultWriter for JsonlWriter {
     ) -> Result<()> {
         serde_json::to_writer(&mut self.writer, record)?;
         writeln!(self.writer)?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())
     }

@@ -163,6 +163,7 @@ pub struct ProgressReporter {
 struct ProgressReporterInner {
     state: Mutex<ProgressState>,
     started: Instant,
+    last_refresh: Mutex<Instant>,
     bar: Option<ProgressBar>,
 }
 
@@ -187,10 +188,11 @@ impl ProgressReporter {
             inner: Arc::new(ProgressReporterInner {
                 state: Mutex::new(ProgressState::new(total)),
                 started: Instant::now(),
+                last_refresh: Mutex::new(Instant::now() - Duration::from_millis(200)),
                 bar,
             }),
         };
-        reporter.refresh();
+        reporter.refresh(true);
         reporter
     }
 
@@ -208,7 +210,7 @@ impl ProgressReporter {
 
     pub fn finish(&self) {
         if let Some(bar) = &self.inner.bar {
-            self.refresh();
+            self.refresh(true);
             bar.finish_and_clear();
         }
     }
@@ -218,13 +220,25 @@ impl ProgressReporter {
             let mut state = self.inner.state.lock().expect("progress state poisoned");
             f(&mut state);
         }
-        self.refresh();
+        self.refresh(false);
     }
 
-    fn refresh(&self) {
+    fn refresh(&self, force: bool) {
         let Some(bar) = &self.inner.bar else {
             return;
         };
+        if !force {
+            let mut last_refresh = self
+                .inner
+                .last_refresh
+                .lock()
+                .expect("progress refresh state poisoned");
+            let now = Instant::now();
+            if now.duration_since(*last_refresh) < Duration::from_millis(200) {
+                return;
+            }
+            *last_refresh = now;
+        }
         let snapshot = {
             let state = self.inner.state.lock().expect("progress state poisoned");
             state.snapshot(self.inner.started.elapsed().as_secs_f64())
@@ -314,9 +328,11 @@ mod tests {
 
     #[test]
     fn formats_eta_and_request_rate() {
-        let mut error_counts = ErrorCounts::default();
-        error_counts.timeout = 2;
-        error_counts.dns = 1;
+        let error_counts = ErrorCounts {
+            timeout: 2,
+            dns: 1,
+            ..ErrorCounts::default()
+        };
         let text = format_snapshot(ProgressSnapshot {
             total: 100,
             completed: 50,

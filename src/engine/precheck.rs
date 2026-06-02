@@ -75,6 +75,7 @@ async fn run_url_precheck(
     let mut failed_values = HashSet::new();
     let mut join_set = JoinSet::new();
     let mut values = wordlist.values.iter();
+    let wordlists = Arc::new(wordlists.to_vec());
 
     while join_set.len() < config.execution.concurrency {
         let Some(value) = values.next() else {
@@ -83,7 +84,7 @@ async fn run_url_precheck(
         spawn_precheck_case(
             &mut join_set,
             config,
-            wordlists,
+            wordlists.clone(),
             key,
             value,
             client.clone(),
@@ -100,7 +101,7 @@ async fn run_url_precheck(
             spawn_precheck_case(
                 &mut join_set,
                 config,
-                wordlists,
+                wordlists.clone(),
                 key,
                 value,
                 client.clone(),
@@ -115,7 +116,7 @@ async fn run_url_precheck(
 fn spawn_precheck_case(
     join_set: &mut JoinSet<Result<Option<(String, String)>>>,
     config: &Config,
-    wordlists: &[WordlistData],
+    wordlists: Arc<Vec<WordlistData>>,
     key: &str,
     value: &str,
     client: Client,
@@ -124,7 +125,6 @@ fn spawn_precheck_case(
     let Some(template) = config.request.url.clone() else {
         return;
     };
-    let wordlists = wordlists.to_vec();
     let key = key.to_string();
     let value = value.to_string();
     join_set.spawn(async move {

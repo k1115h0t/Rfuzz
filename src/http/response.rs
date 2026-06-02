@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use bytes::Bytes;
 use regex::Regex;
 use reqwest::header::LOCATION;
@@ -7,7 +9,9 @@ use crate::matcher::signature::ResponseSignature;
 #[derive(Debug, Clone)]
 pub struct ResponseSummary {
     pub signature: ResponseSignature,
-    pub raw: String,
+    headers: reqwest::header::HeaderMap,
+    body_text: String,
+    raw: Option<String>,
 }
 
 pub fn summarize(
@@ -29,9 +33,7 @@ pub fn summarize(
         .get(LOCATION)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned);
-    let title = extract_title(&body_text);
 
-    let raw = build_raw_response(status, headers, &body_text);
     ResponseSummary {
         signature: ResponseSignature {
             status,
@@ -40,10 +42,52 @@ pub fn summarize(
             lines,
             elapsed_ms,
             location,
-            title,
+            title: None,
             body_hash,
         },
-        raw,
+        headers: headers.clone(),
+        body_text,
+        raw: None,
+    }
+}
+
+impl ResponseSummary {
+    #[cfg(test)]
+    pub fn from_parts(signature: ResponseSignature, raw: String) -> Self {
+        Self {
+            signature,
+            headers: reqwest::header::HeaderMap::new(),
+            body_text: String::new(),
+            raw: Some(raw),
+        }
+    }
+
+    pub fn raw_response(&mut self) -> &str {
+        if self.raw.is_none() {
+            self.raw = Some(build_raw_response(
+                self.signature.status,
+                &self.headers,
+                &self.body_text,
+            ));
+        }
+        self.raw.as_deref().unwrap_or_default()
+    }
+
+    pub fn signature_and_raw_response(&mut self) -> (&ResponseSignature, &str) {
+        if self.raw.is_none() {
+            self.raw = Some(build_raw_response(
+                self.signature.status,
+                &self.headers,
+                &self.body_text,
+            ));
+        }
+        (&self.signature, self.raw.as_deref().unwrap_or_default())
+    }
+
+    pub fn ensure_title(&mut self) {
+        if self.signature.title.is_none() {
+            self.signature.title = extract_title(&self.body_text);
+        }
     }
 }
 
@@ -61,8 +105,10 @@ fn build_raw_response(status: u16, headers: &reqwest::header::HeaderMap, body: &
 }
 
 fn extract_title(body: &str) -> Option<String> {
-    let regex = Regex::new(r"(?is)<title[^>]*>\s*(.*?)\s*</title>").ok()?;
-    regex
+    static TITLE_REGEX: OnceLock<Regex> = OnceLock::new();
+
+    TITLE_REGEX
+        .get_or_init(|| Regex::new(r"(?is)<title[^>]*>\s*(.*?)\s*</title>").unwrap())
         .captures(body)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().trim().to_string())

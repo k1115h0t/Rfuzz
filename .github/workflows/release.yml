@@ -69,6 +69,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -78,15 +81,29 @@ jobs:
       - name: List release files
         run: find dist -maxdepth 1 -type f -print
 
+      - name: Check release notes
+        run: |
+          notes_path="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_path" ]; then
+            echo "Missing release notes: $notes_path"
+            echo "Create this file before pushing the tag."
+            exit 1
+          fi
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_path="docs/releases/${GITHUB_REF_NAME}.md"
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes_path"
             gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
-              --generate-notes
+              --notes-file "$notes_path"
           fi

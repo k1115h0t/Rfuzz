@@ -351,17 +351,17 @@ fn case_from_pitchfork_index(wordlists: &[WordlistData], index: usize) -> InputC
 
 fn case_from_clusterbomb_offset(wordlists: &[WordlistData], offset: usize) -> InputCase {
     let mut remaining = offset;
-    let mut indexes = vec![0; wordlists.len()];
+    let mut values = BTreeMap::new();
     for position in (0..wordlists.len()).rev() {
         let len = wordlists[position].values.len();
-        indexes[position] = remaining % len;
+        let index = remaining % len;
         remaining /= len;
+        values.insert(
+            wordlists[position].keyword.clone(),
+            wordlists[position].values[index].clone(),
+        );
     }
 
-    let mut values = BTreeMap::new();
-    for (wordlist, index) in wordlists.iter().zip(indexes) {
-        values.insert(wordlist.keyword.clone(), wordlist.values[index].clone());
-    }
     let display = display_input(&values);
     InputCase { values, display }
 }
@@ -403,13 +403,8 @@ fn case_from_rotate_window_offset(
     let (target_position, other_offset) =
         rotate_window_positions(within_window, target_window_len, other_total, target_burst);
     let target_value_index = target_window_start + target_position;
-    let mut indexes = indexes_from_other_offset(wordlists, target_index, other_offset);
-    indexes[target_index] = target_value_index;
-
-    let mut values = BTreeMap::new();
-    for (wordlist, index) in wordlists.iter().zip(indexes) {
-        values.insert(wordlist.keyword.clone(), wordlist.values[index].clone());
-    }
+    let values =
+        values_from_rotate_window_offset(wordlists, target_index, target_value_index, other_offset);
     let display = display_input(&values);
     InputCase { values, display }
 }
@@ -443,21 +438,30 @@ fn rotate_window_positions(
     )
 }
 
-fn indexes_from_other_offset(
+fn values_from_rotate_window_offset(
     wordlists: &[WordlistData],
     target_index: usize,
+    target_value_index: usize,
     mut other_offset: usize,
-) -> Vec<usize> {
-    let mut indexes = vec![0; wordlists.len()];
+) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
     for position in (0..wordlists.len()).rev() {
         if position == target_index {
+            values.insert(
+                wordlists[position].keyword.clone(),
+                wordlists[position].values[target_value_index].clone(),
+            );
             continue;
         }
         let len = wordlists[position].values.len();
-        indexes[position] = other_offset % len;
+        let index = other_offset % len;
         other_offset /= len;
+        values.insert(
+            wordlists[position].keyword.clone(),
+            wordlists[position].values[index].clone(),
+        );
     }
-    indexes
+    values
 }
 
 fn scope_prefix_len(wordlists: &[WordlistData], keywords: &[String]) -> Option<usize> {
@@ -485,11 +489,16 @@ fn display_input(values: &InputMap) -> String {
     if values.len() == 1 {
         return values.values().next().cloned().unwrap_or_default();
     }
-    values
-        .iter()
-        .map(|(key, value)| format!("{}={}", key, value))
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut display = String::new();
+    for (index, (key, value)) in values.iter().enumerate() {
+        if index > 0 {
+            display.push(',');
+        }
+        display.push_str(key);
+        display.push('=');
+        display.push_str(value);
+    }
+    display
 }
 
 #[cfg(test)]

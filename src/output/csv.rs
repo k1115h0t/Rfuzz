@@ -43,6 +43,10 @@ impl ResultWriter for CsvResultWriter {
             time_ms: record.time_ms,
             input: &record.input,
         })?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())
     }
