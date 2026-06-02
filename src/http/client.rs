@@ -23,7 +23,11 @@ pub fn build_client(config: &RequestConfig) -> Result<Client> {
         builder = builder.pool_max_idle_per_host(0);
     }
     if config.dns_cache {
-        builder = builder.dns_resolver(Arc::new(CachedResolver::new(config.dns_cache_ttl)));
+        builder = builder.dns_resolver(Arc::new(CachedResolver::new(
+            config.dns_cache_ttl,
+            config.dns_negative_cache_ttl,
+            config.dns_max_concurrent,
+        )));
     }
     if !config.ssl_verify {
         builder = builder
@@ -70,30 +74,4 @@ pub async fn execute(client: &Client, request: &RenderedRequest) -> Result<Respo
         body,
         started.elapsed().as_millis(),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::time::{Duration, Instant};
-
-    use crate::http::dns_cache::DnsCache;
-
-    #[test]
-    fn dns_cache_reuses_entries_until_ttl_expires() {
-        let cache = DnsCache::default();
-        let now = Instant::now();
-        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)];
-
-        cache.store("example.com", addrs.clone(), now, Duration::from_secs(300));
-
-        assert_eq!(
-            cache.get("example.com", now + Duration::from_secs(299)),
-            Some(addrs)
-        );
-        assert_eq!(
-            cache.get("example.com", now + Duration::from_secs(301)),
-            None
-        );
-    }
 }

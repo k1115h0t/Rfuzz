@@ -251,17 +251,24 @@ request may need a new TCP/TLS handshake.
 `rfuzz` 默认开启 HTTP keep-alive，因为 HTTPS 爆破可以复用 TCP/TLS 连接时会快很多。如果超大规模多目标任务仍然耗尽文件描述符，可以使用 `-keepalive off` 作为低 FD 模式；它在较小的
 `ulimit -n` 下更稳，但 HTTPS 吞吐会下降，因为每个请求可能都要重新建立 TCP/TLS 连接。
 
-`rfuzz` 默认开启进程内 DNS 缓存：`-dns-cache on`，默认 TTL 为 300 秒。预检查和正式
-fuzz 共用同一个 HTTP client，所以预检查阶段解析过的域名可以在正式 fuzz 阶段复用。
+`rfuzz` 默认开启进程内 DNS 缓存：`-dns-cache on`，默认成功解析 TTL 为 300
+秒，失败解析 TTL 为 30 秒。预检查和正式 fuzz 共用同一个 HTTP client，所以预检查阶段解析过的域名可以在正式 fuzz 阶段复用。
+
+同一个 host 的并发 DNS 请求会合并成一次真实解析，不同 host 的真实解析默认最多同时进行
+64 个。这样可以降低大规模 `URLFUZZ` 对系统 resolver 的瞬时压力，也可以避免不存在域名在海量组合中被反复解析。
 
 可以按需调整：
 
 ```bash
-rfuzz -u https://URLFUZZ/login -w urls.txt:URLFUZZ -dns-cache on -dns-cache-ttl 300
+rfuzz -u https://URLFUZZ/login -w urls.txt:URLFUZZ \
+  -dns-cache on \
+  -dns-cache-ttl 300 \
+  -dns-negative-cache-ttl 30 \
+  -dns-max-concurrent 64
 ```
 
-DNS 缓存只能减少重复解析开销，不能把连接超时、目标限速、目标服务慢响应变快。如果进度条里
-`avg` 很高并且 `err timeout` 占大头，瓶颈通常是目标不可达或超时等待，而不是 DNS。
+DNS 缓存只能减少重复解析开销，不能把连接超时、目标限速、目标服务慢响应变快。进度条里的
+`err dns` 仍然表示该请求因为 DNS 失败而结束；如果命中失败缓存，它不会再次发起真实系统解析。如果进度条里 `avg` 很高并且 `err timeout` 占大头，瓶颈通常是目标不可达或超时等待，而不是 DNS。
 
 ## Precheck / 预检查
 
@@ -682,6 +689,8 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`,
 | `-keepalive` | `on`, `off` | HTTP keep-alive connection reuse, default on. HTTP keep-alive 连接复用，默认开启。 | `-keepalive off` |
 | `-dns-cache` | `on`, `off` | DNS cache, default on. DNS 解析缓存，默认开启。 | `-dns-cache on` |
 | `-dns-cache-ttl` | Seconds / 秒 | DNS cache TTL. DNS 解析缓存有效期。 | `-dns-cache-ttl 300` |
+| `-dns-negative-cache-ttl` | Seconds / 秒 | DNS failure cache TTL, `0` disables. DNS 失败缓存有效期，`0` 禁用。 | `-dns-negative-cache-ttl 30` |
+| `-dns-max-concurrent` | Number / 数字 | Maximum concurrent real DNS lookups. 最大并发真实 DNS 解析数。 | `-dns-max-concurrent 64` |
 | `-sni` | Hostname / 主机名 | Accepted for compatibility; arbitrary SNI override is not implemented. 兼容参数，当前不支持任意覆盖 SNI。 | `-sni example.com` |
 | `-cc` | PEM path / PEM 路径 | Client certificate. 客户端证书。 | `-cc client.crt` |
 | `-ck` | PEM path / PEM 路径 | Client private key. 客户端私钥。 | `-ck client.key` |

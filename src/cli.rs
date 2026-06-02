@@ -116,6 +116,20 @@ pub struct Cli {
     pub dns_cache_ttl_secs: u64,
 
     #[arg(
+        long = "dns-negative-cache-ttl",
+        default_value_t = 30,
+        help = "DNS 失败缓存 TTL 秒数，0 禁用 / DNS failure cache TTL in seconds, 0 disables"
+    )]
+    pub dns_negative_cache_ttl_secs: u64,
+
+    #[arg(
+        long = "dns-max-concurrent",
+        default_value_t = 64,
+        help = "最大并发 DNS 解析数 / Maximum concurrent DNS lookups"
+    )]
+    pub dns_max_concurrent: usize,
+
+    #[arg(
         long = "cc",
         help = "客户端证书 PEM 路径 / Client certificate PEM path"
     )]
@@ -431,6 +445,8 @@ where
         "-keepalive",
         "-dns-cache",
         "-dns-cache-ttl",
+        "-dns-negative-cache-ttl",
+        "-dns-max-concurrent",
         "-cc",
         "-ck",
         "-request",
@@ -553,6 +569,10 @@ mod tests {
             "on".to_string(),
             "-dns-cache-ttl".to_string(),
             "300".to_string(),
+            "-dns-negative-cache-ttl".to_string(),
+            "30".to_string(),
+            "-dns-max-concurrent".to_string(),
+            "64".to_string(),
         ]);
 
         assert_eq!(
@@ -569,6 +589,10 @@ mod tests {
                 "on",
                 "--dns-cache-ttl",
                 "300",
+                "--dns-negative-cache-ttl",
+                "30",
+                "--dns-max-concurrent",
+                "64",
             ]
         );
     }

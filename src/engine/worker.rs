@@ -82,7 +82,11 @@ fn classify_error_text(text: &str) -> ErrorKind {
         ErrorKind::FileDescriptor
     } else if lower.contains("timed out") || lower.contains("timeout") {
         ErrorKind::Timeout
-    } else if lower.contains("dns") || lower.contains("lookup") || lower.contains("resolve") {
+    } else if lower.contains("dns")
+        || lower.contains("lookup")
+        || lower.contains("resolve")
+        || lower.contains("name does not resolve")
+    {
         ErrorKind::Dns
     } else if lower.contains("connect")
         || lower.contains("connection refused")
@@ -116,6 +120,10 @@ mod tests {
         );
         assert_eq!(
             classify_error_text("dns error: failed to lookup address information"),
+            ErrorKind::Dns
+        );
+        assert_eq!(
+            classify_error_text("cached DNS failure for example.com: name does not resolve"),
             ErrorKind::Dns
         );
         assert_eq!(

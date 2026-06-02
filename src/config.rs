@@ -42,6 +42,8 @@ pub struct RequestConfig {
     pub keepalive: bool,
     pub dns_cache: bool,
     pub dns_cache_ttl: Duration,
+    pub dns_negative_cache_ttl: Duration,
+    pub dns_max_concurrent: usize,
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
 }
@@ -249,6 +251,8 @@ impl TryFrom<Cli> for Config {
             keepalive: parse_on_off_switch("-keepalive", &cli.keepalive)?,
             dns_cache: parse_on_off_switch("-dns-cache", &cli.dns_cache)?,
             dns_cache_ttl: Duration::from_secs(cli.dns_cache_ttl_secs.max(1)),
+            dns_negative_cache_ttl: Duration::from_secs(cli.dns_negative_cache_ttl_secs),
+            dns_max_concurrent: cli.dns_max_concurrent.max(1),
             client_cert: cli.client_cert,
             client_key: cli.client_key,
         };
@@ -739,10 +743,15 @@ mod tests {
 
         assert!(config.request.dns_cache);
         assert_eq!(config.request.dns_cache_ttl, Duration::from_secs(300));
+        assert_eq!(
+            config.request.dns_negative_cache_ttl,
+            Duration::from_secs(30)
+        );
+        assert_eq!(config.request.dns_max_concurrent, 64);
     }
 
     #[test]
-    fn parses_dns_cache_off_and_ttl() {
+    fn parses_dns_cache_options() {
         let cli = Cli::parse_from([
             "rfuzz",
             "-u",
@@ -753,12 +762,21 @@ mod tests {
             "off",
             "--dns-cache-ttl",
             "60",
+            "--dns-negative-cache-ttl",
+            "5",
+            "--dns-max-concurrent",
+            "8",
         ]);
 
         let config = Config::try_from(cli).unwrap();
 
         assert!(!config.request.dns_cache);
         assert_eq!(config.request.dns_cache_ttl, Duration::from_secs(60));
+        assert_eq!(
+            config.request.dns_negative_cache_ttl,
+            Duration::from_secs(5)
+        );
+        assert_eq!(config.request.dns_max_concurrent, 8);
     }
 
     #[test]
