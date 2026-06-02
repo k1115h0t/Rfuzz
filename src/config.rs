@@ -391,12 +391,6 @@ fn parse_schedule(
             "-schedule rotate-window can only be used with -mode clusterbomb"
         ));
     }
-    if mode == ScheduleMode::RotateWindow && cli.order.is_some() {
-        return Err(anyhow!(
-            "-schedule rotate-window cannot be combined with -order"
-        ));
-    }
-
     let target_key = if mode == ScheduleMode::RotateWindow {
         let inferred = cli
             .target_key
@@ -686,6 +680,36 @@ mod tests {
         );
         assert_eq!(config.execution.schedule.target_window, 50);
         assert_eq!(config.execution.schedule.target_burst, 4);
+    }
+
+    #[test]
+    fn allows_rotate_window_schedule_with_order() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "URLFUZZ/login",
+            "-w",
+            "urls.txt:URLFUZZ",
+            "-w",
+            "users.txt:UFUZZ",
+            "-w",
+            "passes.txt:PFUZZ",
+            "--order",
+            "UFUZZ,PFUZZ,URLFUZZ",
+            "--precheck-key",
+            "URLFUZZ",
+            "--schedule",
+            "rotate-window",
+        ]);
+
+        let config = Config::try_from(cli).unwrap();
+
+        assert_eq!(config.execution.schedule.mode, ScheduleMode::RotateWindow);
+        assert_eq!(config.input.order, vec!["UFUZZ", "PFUZZ", "URLFUZZ"]);
+        assert_eq!(
+            config.execution.schedule.target_key.as_deref(),
+            Some("URLFUZZ")
+        );
     }
 
     #[test]

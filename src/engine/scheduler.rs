@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -13,14 +13,17 @@ use crate::engine::worker;
 use crate::http::client;
 use crate::http::client::build_client;
 use crate::input::modes::{
-    clusterbomb, clusterbomb_ordered, clusterbomb_rotate_window, pitchfork, InputCase, InputCases,
-    ScopeCases,
+    clusterbomb, clusterbomb_ordered, clusterbomb_ordered_rotate_window, clusterbomb_rotate_window,
+    pitchfork, InputCase, InputCases, ScopeCases,
 };
 use crate::input::wordlist::{load_wordlists, WordlistLoadOptions};
 use crate::output::{
     build_writer, error_log::build_error_logger, error_log::ErrorLogger, raw::save_raw_exchange,
     OutputRecord, RawExchange,
 };
+
+const CASE_QUEUE_MULTIPLIER: usize = 20;
+const CASE_QUEUE_MAX: usize = 8192;
 
 pub async fn run(config: Config) -> Result<()> {
     if config.future.auto_calibration.enabled {
@@ -29,7 +32,7 @@ pub async fn run(config: Config) -> Result<()> {
         );
     }
 
-    let wordlists = load_wordlists(
+    let mut wordlists = load_wordlists(
         &config.input.wordlists,
         &WordlistLoadOptions {
             ignore_comments: config.input.ignore_wordlist_comments,
@@ -38,6 +41,13 @@ pub async fn run(config: Config) -> Result<()> {
     )?;
     let client = build_client(&config.request)?;
     let precheck_skipper = precheck::run(&config, &wordlists, client.clone()).await?;
+    let precheck_skipped =
+        fast_filter_precheck_failures(&config, &mut wordlists, precheck_skipper.as_deref());
+    let precheck_skipper = if precheck_skipped > 0 {
+        None
+    } else {
+        precheck_skipper
+    };
 
     let mut cases = match config.input.mode {
         FuzzMode::Sniper => {
@@ -53,25 +63,45 @@ pub async fn run(config: Config) -> Result<()> {
                     .target_key
                     .as_deref()
                     .ok_or_else(|| anyhow!("-schedule rotate-window requires -target-key"))?;
-                clusterbomb_rotate_window(
+                if config.input.order.is_empty() {
+                    clusterbomb_rotate_window(
+                        wordlists,
+                        target_key,
+                        config.execution.schedule.target_window,
+                        config.execution.schedule.target_burst,
+                        config.input.budget_requests,
+                    )?
+                } else {
+                    clusterbomb_ordered_rotate_window(
+                        wordlists,
+                        &config.input.order,
+                        target_key,
+                        config.execution.schedule.target_window,
+                        config.execution.schedule.target_burst,
+                        config.input.budget_requests,
+                    )?
+                }
+            } else if config.input.order.is_empty() {
+                clusterbomb(wordlists, config.input.budget_requests)?
+            } else if let Some(target_key) = ordered_schedule_target_key(&config) {
+                clusterbomb_ordered_rotate_window(
                     wordlists,
+                    &config.input.order,
                     target_key,
                     config.execution.schedule.target_window,
                     config.execution.schedule.target_burst,
                     config.input.budget_requests,
                 )?
-            } else if config.input.order.is_empty() {
-                clusterbomb(wordlists, config.input.budget_requests)?
             } else {
                 clusterbomb_ordered(wordlists, &config.input.order, config.input.budget_requests)?
             }
         }
     };
 
-    if cases.is_empty() {
+    let total_cases = cases.total().saturating_add(precheck_skipped);
+    if total_cases == 0 {
         return Err(anyhow!("no input cases generated"));
     }
-    let total_cases = cases.total();
 
     let replay_client = if let Some(replay_proxy) = &config.request.replay_proxy {
         let mut replay_config = config.request.clone();
@@ -88,24 +118,18 @@ pub async fn run(config: Config) -> Result<()> {
     )?));
     let matcher = Arc::new(config.matcher.clone());
     let progress = ProgressReporter::new(total_cases, config.output.progress);
+    if precheck_skipped > 0 {
+        progress.record_skipped_by(precheck_skipped);
+    }
+    if cases.is_empty() {
+        progress.finish();
+        flush_writer(writer).await?;
+        flush_error_logger(error_logger).await?;
+        return Ok(());
+    }
 
     if config.future.stop.stop_on_match.is_some() && !config.future.stop.stop_scope.is_empty() {
-        let result = if !config.input.order.is_empty() {
-            run_with_order_batches(
-                config,
-                cases,
-                client,
-                replay_client,
-                limiter,
-                writer.clone(),
-                error_logger.clone(),
-                matcher,
-                progress.clone(),
-                true,
-                precheck_skipper.clone(),
-            )
-            .await
-        } else if cases.scope_is_prefix(&config.future.stop.stop_scope) {
+        let result = if cases.scope_is_prefix(&config.future.stop.stop_scope) {
             run_with_scoped_stop(
                 config,
                 cases,
@@ -140,31 +164,136 @@ pub async fn run(config: Config) -> Result<()> {
         return result.and(writer_flush_result).and(flush_result);
     }
 
-    if !config.input.order.is_empty() {
-        let result = run_with_order_batches(
-            config,
-            cases,
-            client,
-            replay_client,
-            limiter,
-            writer.clone(),
-            error_logger.clone(),
-            matcher,
-            progress.clone(),
-            false,
-            precheck_skipper.clone(),
-        )
-        .await;
-        progress.finish();
-        let writer_flush_result = flush_writer(writer).await;
-        let flush_result = flush_error_logger(error_logger).await;
-        return result.and(writer_flush_result).and(flush_result);
+    run_with_case_queue(
+        config,
+        cases,
+        client,
+        replay_client,
+        limiter,
+        writer.clone(),
+        error_logger.clone(),
+        matcher,
+        progress.clone(),
+        precheck_skipper.clone(),
+    )
+    .await?;
+    progress.finish();
+    flush_writer(writer).await?;
+    flush_error_logger(error_logger).await?;
+    Ok(())
+}
+
+fn ordered_schedule_target_key(config: &Config) -> Option<&str> {
+    config
+        .execution
+        .schedule
+        .target_key
+        .as_deref()
+        .or(config.precheck.key.as_deref())
+        .or_else(|| config.future.stop.stop_scope.first().map(String::as_str))
+}
+
+fn next_precheck_case(
+    cases: &mut InputCases,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    progress: &ProgressReporter,
+) -> Option<InputCase> {
+    for input in cases.by_ref() {
+        if should_skip_precheck(&input, precheck_skipper.as_deref()) {
+            progress.record_skipped_by(1);
+        } else {
+            return Some(input);
+        }
+    }
+    None
+}
+
+fn fast_filter_precheck_failures(
+    config: &Config,
+    wordlists: &mut [crate::input::wordlist::WordlistData],
+    precheck_skipper: Option<&PrecheckSkipper>,
+) -> usize {
+    let Some(skipper) = precheck_skipper else {
+        return 0;
+    };
+    if config.input.mode != FuzzMode::Clusterbomb || config.input.budget_requests.is_some() {
+        return 0;
+    }
+    if skipper.failed_values().is_empty() {
+        return 0;
     }
 
+    let Some(position) = wordlists
+        .iter()
+        .position(|wordlist| wordlist.keyword == skipper.key())
+    else {
+        return 0;
+    };
+    let before = wordlists[position].values.len();
+    let other_total = wordlists
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != position)
+        .map(|(_, wordlist)| wordlist.values.len())
+        .fold(1usize, usize::saturating_mul);
+
+    wordlists[position]
+        .values
+        .retain(|value| !skipper.failed_values().contains(value));
+
+    before
+        .saturating_sub(wordlists[position].values.len())
+        .saturating_mul(other_total)
+}
+
+fn case_queue_capacity(concurrency: usize) -> usize {
+    let concurrency = concurrency.max(1);
+    concurrency
+        .saturating_mul(CASE_QUEUE_MULTIPLIER)
+        .min(CASE_QUEUE_MAX.max(concurrency))
+}
+
+fn fill_case_queue(
+    cases: &mut InputCases,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+    progress: &ProgressReporter,
+    queue: &mut VecDeque<InputCase>,
+    capacity: usize,
+) {
+    while queue.len() < capacity {
+        let Some(input) = next_precheck_case(cases, precheck_skipper.clone(), progress) else {
+            break;
+        };
+        queue.push_back(input);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_with_case_queue(
+    config: Config,
+    mut cases: InputCases,
+    client: reqwest::Client,
+    replay_client: Option<reqwest::Client>,
+    limiter: RateLimiter,
+    writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
+    error_logger: Arc<Mutex<Option<ErrorLogger>>>,
+    matcher: Arc<crate::matcher::legacy::MatcherConfig>,
+    progress: ProgressReporter,
+    precheck_skipper: Option<Arc<PrecheckSkipper>>,
+) -> Result<()> {
+    let queue_capacity = case_queue_capacity(config.execution.concurrency);
+    let mut case_queue = VecDeque::with_capacity(queue_capacity);
     let mut join_set = JoinSet::new();
+
+    fill_case_queue(
+        &mut cases,
+        precheck_skipper.clone(),
+        &progress,
+        &mut case_queue,
+        queue_capacity,
+    );
     while join_set.len() < config.execution.concurrency {
-        let Some(input) = next_precheck_case(&mut cases, precheck_skipper.clone(), &progress)
-        else {
+        let Some(input) = case_queue.pop_front() else {
             break;
         };
         spawn_case(
@@ -187,7 +316,17 @@ pub async fn run(config: Config) -> Result<()> {
 
     while let Some(result) = join_set.join_next().await {
         result??;
-        if let Some(input) = next_precheck_case(&mut cases, precheck_skipper.clone(), &progress) {
+        fill_case_queue(
+            &mut cases,
+            precheck_skipper.clone(),
+            &progress,
+            &mut case_queue,
+            queue_capacity,
+        );
+        while join_set.len() < config.execution.concurrency {
+            let Some(input) = case_queue.pop_front() else {
+                break;
+            };
             spawn_case(
                 &mut join_set,
                 input,
@@ -206,28 +345,11 @@ pub async fn run(config: Config) -> Result<()> {
             );
         }
     }
-    progress.finish();
-    flush_writer(writer).await?;
-    flush_error_logger(error_logger).await?;
+
     Ok(())
 }
 
-fn next_precheck_case(
-    cases: &mut InputCases,
-    precheck_skipper: Option<Arc<PrecheckSkipper>>,
-    progress: &ProgressReporter,
-) -> Option<InputCase> {
-    for input in cases.by_ref() {
-        if should_skip_precheck(&input, precheck_skipper.as_deref()) {
-            progress.record_skipped_by(1);
-        } else {
-            return Some(input);
-        }
-    }
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 async fn run_with_order_batches(
     config: Config,
     mut cases: InputCases,
@@ -750,9 +872,10 @@ async fn handle_match_result(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
 
+    use clap::Parser;
     use regex::Regex;
 
     use super::*;
@@ -762,6 +885,13 @@ mod tests {
     use crate::matcher::legacy::MatcherConfig;
     use crate::matcher::signature::ResponseSignature;
     use crate::output::{OutputRecord, ResultWriter};
+
+    fn wl(keyword: &str, values: &[&str]) -> crate::input::wordlist::WordlistData {
+        crate::input::wordlist::WordlistData {
+            keyword: keyword.to_string(),
+            values: values.iter().map(|value| value.to_string()).collect(),
+        }
+    }
 
     struct CollectingWriter {
         records: StdArc<StdMutex<Vec<OutputRecord>>>,
@@ -858,5 +988,44 @@ mod tests {
         tracker.record_match(&url1_first);
         assert!(!tracker.should_skip(&url2));
         assert!(tracker.should_skip(&url1_later));
+    }
+
+    #[test]
+    fn fast_precheck_filter_skips_failed_clusterbomb_values_as_full_product() {
+        let cli = crate::cli::Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "URLFUZZ/login",
+            "-w",
+            "urls.txt:URLFUZZ",
+            "-w",
+            "users.txt:UFUZZ",
+            "-w",
+            "passes.txt:PFUZZ",
+            "--precheck-key",
+            "URLFUZZ",
+        ]);
+        let config = Config::try_from(cli).unwrap();
+        let mut wordlists = vec![
+            wl("URLFUZZ", &["u1", "u2", "u3"]),
+            wl("UFUZZ", &["alice", "bob"]),
+            wl("PFUZZ", &["p1", "p2"]),
+        ];
+        let skipper = PrecheckSkipper::new(
+            "URLFUZZ".to_string(),
+            HashSet::from(["u1".to_string(), "u3".to_string()]),
+        );
+
+        let skipped = fast_filter_precheck_failures(&config, &mut wordlists, Some(&skipper));
+
+        assert_eq!(skipped, 8);
+        assert_eq!(wordlists[0].values, vec!["u2"]);
+    }
+
+    #[test]
+    fn case_queue_capacity_is_bounded() {
+        assert_eq!(case_queue_capacity(1), 20);
+        assert_eq!(case_queue_capacity(100), 2000);
+        assert_eq!(case_queue_capacity(10_000), 10_000);
     }
 }

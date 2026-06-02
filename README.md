@@ -500,13 +500,13 @@ UFUZZ=user1 PFUZZ=pass2 URLFUZZ=url2
 ...
 ```
 
-When `-order` is set, `rfuzz` also respects order batches during scheduling. For
-`-order UFUZZ,PFUZZ,URLFUZZ`, all URLs for the current `UFUZZ+PFUZZ` pair finish
-before the next password pair is scheduled. If the URL list is smaller than
-`-t`, actual concurrency for that batch is capped by the number of URLs.
+When `-order` is set, `rfuzz` uses the order as generation priority but does not
+wait for each order batch to drain before scheduling the next work. Cases are
+fed through a bounded in-memory queue, so large jobs keep high concurrency
+without preloading the whole Cartesian product.
 
-设置 `-order` 后，`rfuzz` 调度时也会遵守这个批次顺序。对于
-`-order UFUZZ,PFUZZ,URLFUZZ`，当前 `UFUZZ+PFUZZ` 组合下的所有 URL 完成后，才会调度下一个密码组合。如果 URL 数量小于 `-t`，该批次的实际并发会被 URL 数量限制。
+设置 `-order` 后，`rfuzz` 会把它作为组合生成优先级，但不会等待每个 order
+批次全部完成后才调度下一批。请求会通过一个有界内存队列送入 worker，因此大任务可以保持高并发，同时不会把整个笛卡尔积预加载进内存。
 
 `-order` currently applies to `clusterbomb` mode only.
 
@@ -559,10 +559,11 @@ URLFUZZ=url2 UFUZZ=user1 PFUZZ=pass3
 ...
 ```
 
-这个模式适合“既要轮转 URL，又希望保持较高请求速率”的场景。相比
-`-order UFUZZ,PFUZZ,URLFUZZ`，它不会等一个账号/密码组合扫完整个 URL 列表后才进入下一个组合，因此更容易让活跃窗口内的 DNS 缓存、TCP/TLS keep-alive 被复用。
+这个模式适合“既要轮转 URL，又希望保持较高请求速率”的场景。它可以和
+`-order` 一起使用；当 `-order` 配合 `-precheck-key`、`-target-key` 或
+`-stop-scope` 指定了目标 keyword 时，`rfuzz` 会自动使用目标窗口轮转，避免等一个账号/密码组合扫完整个 URL 列表后才进入下一个组合，因此更容易让活跃窗口内的 DNS 缓存、TCP/TLS keep-alive 被复用。
 
-`-schedule rotate-window` 不能和 `-order` 同时使用；它只适用于 `clusterbomb` 模式。
+`-schedule rotate-window` 只适用于 `clusterbomb` 模式。
 
 Input combinations are generated lazily. Even when `clusterbomb` produces a very
 large total such as hundreds of millions of combinations, `rfuzz` does not

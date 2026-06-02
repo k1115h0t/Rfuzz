@@ -272,6 +272,27 @@ pub fn clusterbomb_ordered(
     order: &[String],
     budget: Option<usize>,
 ) -> Result<InputCases> {
+    clusterbomb(order_wordlists(wordlists, order)?, budget)
+}
+
+pub fn clusterbomb_ordered_rotate_window(
+    wordlists: Vec<WordlistData>,
+    order: &[String],
+    target_key: &str,
+    target_window: usize,
+    target_burst: usize,
+    budget: Option<usize>,
+) -> Result<InputCases> {
+    clusterbomb_rotate_window(
+        order_wordlists(wordlists, order)?,
+        target_key,
+        target_window,
+        target_burst,
+        budget,
+    )
+}
+
+fn order_wordlists(wordlists: Vec<WordlistData>, order: &[String]) -> Result<Vec<WordlistData>> {
     let mut ordered = Vec::with_capacity(wordlists.len());
     let mut remaining = wordlists;
     for keyword in order {
@@ -293,7 +314,7 @@ pub fn clusterbomb_ordered(
             "-order must include every wordlist keyword; missing: {missing}"
         ));
     }
-    clusterbomb(ordered, budget)
+    Ok(ordered)
 }
 
 pub fn clusterbomb_rotate_window(
@@ -732,5 +753,54 @@ mod tests {
         .unwrap();
 
         assert!(!cases.scope_is_prefix(&["URLFUZZ".to_string()]));
+    }
+
+    #[test]
+    fn ordered_rotate_window_preserves_ordered_non_target_priority() {
+        let cases = clusterbomb_ordered_rotate_window(
+            vec![
+                wl("URLFUZZ", &["u1", "u2"]),
+                wl("UFUZZ", &["alice", "bob"]),
+                wl("PFUZZ", &["p1", "p2", "p3"]),
+            ],
+            &[
+                "UFUZZ".to_string(),
+                "PFUZZ".to_string(),
+                "URLFUZZ".to_string(),
+            ],
+            "URLFUZZ",
+            2,
+            2,
+            None,
+        )
+        .unwrap();
+
+        let rendered = cases
+            .take(12)
+            .map(|case| {
+                format!(
+                    "{}:{}:{}",
+                    case.values["UFUZZ"], case.values["PFUZZ"], case.values["URLFUZZ"]
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "alice:p1:u1",
+                "alice:p2:u1",
+                "alice:p1:u2",
+                "alice:p2:u2",
+                "alice:p3:u1",
+                "bob:p1:u1",
+                "alice:p3:u2",
+                "bob:p1:u2",
+                "bob:p2:u1",
+                "bob:p3:u1",
+                "bob:p2:u2",
+                "bob:p3:u2",
+            ]
+        );
     }
 }

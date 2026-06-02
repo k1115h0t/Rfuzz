@@ -26,6 +26,14 @@ impl PrecheckSkipper {
         Self { key, failed_values }
     }
 
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn failed_values(&self) -> &HashSet<String> {
+        &self.failed_values
+    }
+
     pub fn can_fast_skip_scope(&self, scope_keywords: &[String]) -> bool {
         scope_keywords.iter().any(|keyword| keyword == &self.key)
     }
