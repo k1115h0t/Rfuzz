@@ -49,7 +49,7 @@ pub async fn run(config: Config) -> Result<()> {
         precheck_skipper
     };
 
-    let mut cases = match config.input.mode {
+    let cases = match config.input.mode {
         FuzzMode::Sniper => {
             tracing::warn!("sniper mode is reserved; using pitchfork behavior for v0.1");
             pitchfork(wordlists, config.input.budget_requests)
@@ -916,7 +916,7 @@ mod tests {
                 records: records.clone(),
             })));
         let matcher = MatcherConfig {
-            match_regex: vec![Regex::new("Set-Cookie: 3x-ui=").unwrap()],
+            match_regex: vec![Regex::new("Set-Cookie: session_id=").unwrap()],
             ..MatcherConfig::default()
         };
         let result = worker::WorkerResult {
@@ -944,7 +944,7 @@ mod tests {
                     title: None,
                     body_hash: 0,
                 },
-                "HTTP/1.1 200\r\nSet-Cookie: 3x-ui=abc\r\n\r\nok".to_string(),
+                "HTTP/1.1 200\r\nSet-Cookie: session_id=abc\r\n\r\nok".to_string(),
             ),
         };
 

