@@ -7,7 +7,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -282,8 +282,10 @@ rfuzz -u https://TARGET/login \
 进度字段：
 
 ```text
-done/total | percent | matched | errors | skipped | avg | req/s | err | ETA
+done/total | percent | matched | errors | skipped | err | ETA
 ```
+
+`ETA` 使用最近完成的真实 case 速度估算，会包含限速、延迟、跳过、匹配和输出写入带来的实际影响。
 
 关闭进度条：
 
