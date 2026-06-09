@@ -110,6 +110,7 @@ pub struct PrecheckConfig {
     pub enabled: bool,
     pub key: Option<String>,
     pub report_only: bool,
+    pub attempts: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +227,7 @@ impl TryFrom<Cli> for Config {
             enabled: parse_precheck_switch(&cli.precheck)?,
             key: cli.precheck_key.clone(),
             report_only: cli.precheck_report_only,
+            attempts: cli.precheck_attempts.max(1),
         };
         if let Some(key) = &precheck.key {
             validate_keywords_exist("-precheck-key", std::slice::from_ref(key), &keywords)?;
@@ -541,6 +543,8 @@ mod tests {
             "--precheck-key",
             "URLFUZZ",
             "--precheck-report-only",
+            "--precheck-attempts",
+            "5",
         ]);
 
         let config = Config::try_from(cli).unwrap();
@@ -548,6 +552,7 @@ mod tests {
         assert!(!config.precheck.enabled);
         assert_eq!(config.precheck.key.as_deref(), Some("URLFUZZ"));
         assert!(config.precheck.report_only);
+        assert_eq!(config.precheck.attempts, 5);
     }
 
     #[test]

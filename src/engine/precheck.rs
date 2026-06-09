@@ -1,6 +1,5 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::Client;
@@ -11,9 +10,6 @@ use crate::engine::rate_limiter::RateLimiter;
 use crate::input::modes::InputCase;
 use crate::input::wordlist::WordlistData;
 use crate::template::render::InputMap;
-
-const PRECHECK_ATTEMPTS: usize = 3;
-const PRECHECK_RETRY_DELAY_MS: u64 = 150;
 
 #[derive(Debug)]
 pub struct PrecheckSkipper {
@@ -81,31 +77,24 @@ async fn run_url_precheck(
     let key = &wordlist.keyword;
     let limiter = RateLimiter::new(config.execution.rate_per_sec);
     let mut failed_values = HashSet::new();
-    let mut join_set = JoinSet::new();
-    let mut values = wordlist.values.iter();
     let wordlists = Arc::new(wordlists.to_vec());
+    let attempts = config.precheck.attempts.max(1);
+    let mut pending_values = wordlist.values.clone();
 
-    while join_set.len() < config.execution.concurrency {
-        let Some(value) = values.next() else {
+    for attempt in 1..=attempts {
+        if pending_values.is_empty() {
             break;
-        };
-        spawn_precheck_case(
-            &mut join_set,
-            config,
-            wordlists.clone(),
-            key,
-            value,
-            client.clone(),
-            limiter.clone(),
-        );
-    }
-
-    while let Some(result) = join_set.join_next().await {
-        if let Some((value, message)) = result?? {
-            eprintln!("{}", message);
-            failed_values.insert(value);
         }
-        if let Some(value) = values.next() {
+
+        let mut join_set = JoinSet::new();
+        let round_values = std::mem::take(&mut pending_values);
+        let mut values = round_values.iter().cloned();
+        let mut round_failures: HashMap<String, Vec<String>> = HashMap::new();
+
+        while join_set.len() < config.execution.concurrency {
+            let Some(value) = values.next() else {
+                break;
+            };
             spawn_precheck_case(
                 &mut join_set,
                 config,
@@ -116,17 +105,48 @@ async fn run_url_precheck(
                 limiter.clone(),
             );
         }
+
+        while let Some(result) = join_set.join_next().await {
+            if let Some((value, failures)) = result?? {
+                round_failures.insert(value, failures);
+            }
+            if let Some(value) = values.next() {
+                spawn_precheck_case(
+                    &mut join_set,
+                    config,
+                    wordlists.clone(),
+                    key,
+                    value,
+                    client.clone(),
+                    limiter.clone(),
+                );
+            }
+        }
+
+        if attempt == attempts {
+            for value in round_values {
+                if let Some(failures) = round_failures.remove(&value) {
+                    eprintln!("PRECHECK ERROR {}={} {}", key, value, failures.join("; "));
+                    failed_values.insert(value);
+                }
+            }
+        } else {
+            pending_values = round_values
+                .into_iter()
+                .filter(|value| round_failures.contains_key(value))
+                .collect();
+        }
     }
 
     Ok(failed_values)
 }
 
 fn spawn_precheck_case(
-    join_set: &mut JoinSet<Result<Option<(String, String)>>>,
+    join_set: &mut JoinSet<Result<Option<(String, Vec<String>)>>>,
     config: &Config,
     wordlists: Arc<Vec<WordlistData>>,
     key: &str,
-    value: &str,
+    value: String,
     client: Client,
     limiter: RateLimiter,
 ) {
@@ -134,7 +154,6 @@ fn spawn_precheck_case(
         return;
     };
     let key = key.to_string();
-    let value = value.to_string();
     join_set.spawn(async move {
         limiter.wait().await;
         let input = precheck_input_values(&wordlists, &key, &value);
@@ -142,35 +161,16 @@ fn spawn_precheck_case(
         let candidates = candidate_urls(&rendered);
         let mut failures = Vec::new();
         for url in &candidates {
-            match check_url(&client, url).await {
-                Ok(()) => return Ok(None),
-                Err(error) => failures.push(format!("{}: {}", url, brief_error(&error))),
-            }
-        }
-        Ok(Some((
-            value.clone(),
-            format!("PRECHECK ERROR {}={} {}", key, value, failures.join("; ")),
-        )))
-    });
-}
-
-async fn check_url(client: &Client, url: &str) -> Result<()> {
-    for attempt in 1..=PRECHECK_ATTEMPTS {
-        match client.get(url).send().await {
-            Ok(_) => return Ok(()),
-            Err(error) => {
-                let error = anyhow::Error::new(error);
-                if attempt == PRECHECK_ATTEMPTS || !is_transient_precheck_error(&error) {
-                    return Err(error);
+            match client.get(url).send().await {
+                Ok(_) => return Ok(None),
+                Err(error) => {
+                    let error = anyhow::Error::new(error);
+                    failures.push(format!("{}: {}", url, brief_error(&error)));
                 }
-                tokio::time::sleep(Duration::from_millis(
-                    PRECHECK_RETRY_DELAY_MS * attempt as u64,
-                ))
-                .await;
             }
         }
-    }
-    unreachable!("precheck attempts loop always returns")
+        Ok(Some((value, failures)))
+    });
 }
 
 fn resolve_precheck_key(config: &Config) -> Option<String> {
@@ -241,15 +241,6 @@ fn brief_error_text(text: &str) -> String {
     reason
 }
 
-fn is_transient_precheck_error(error: &anyhow::Error) -> bool {
-    is_transient_precheck_error_text(&format!("{:#}", error))
-}
-
-fn is_transient_precheck_error_text(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    is_fd_exhaustion_text(&lower) || is_temporary_dns_text(&lower)
-}
-
 fn is_fd_exhaustion_text(lower: &str) -> bool {
     lower.contains("no file descriptors")
         || lower.contains("too many open files")
@@ -266,7 +257,16 @@ fn is_temporary_dns_text(lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashSet};
+    use std::sync::Arc;
 
+    use clap::Parser;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    use crate::cli::Cli;
+    use crate::config::Config;
+    use crate::http::client::build_client;
     use crate::input::modes::InputCase;
     use crate::input::wordlist::WordlistData;
 
@@ -352,16 +352,58 @@ mod tests {
         assert_eq!(reason, "file descriptor exhausted");
     }
 
-    #[test]
-    fn transient_precheck_error_detects_temporary_dns_and_fd_errors() {
-        assert!(is_transient_precheck_error_text(
-            "dns error: failed to lookup address information: Temporary failure in name resolution"
-        ));
-        assert!(is_transient_precheck_error_text(
-            "dns error: failed to lookup address information: No file descriptors available"
-        ));
-        assert!(!is_transient_precheck_error_text(
-            "dns error: failed to lookup address information: Name does not resolve"
-        ));
+    #[tokio::test]
+    async fn precheck_report_only_retries_targets_by_round_without_skipper() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_paths = Arc::new(Mutex::new(Vec::new()));
+        let server_paths = seen_paths.clone();
+
+        let server = tokio::spawn(async move {
+            for _ in 0..6 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 1024];
+                let count = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                server_paths.lock().await.push(path);
+            }
+        });
+
+        let url = format!("http://{}/URLFUZZ", addr);
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            &url,
+            "-w",
+            "urls.txt:URLFUZZ",
+            "--precheck-key",
+            "URLFUZZ",
+            "--precheck-report-only",
+            "--precheck-attempts",
+            "2",
+            "-t",
+            "1",
+        ]);
+        let config = Config::try_from(cli).unwrap();
+        let wordlists = vec![WordlistData {
+            keyword: "URLFUZZ".to_string(),
+            values: vec!["one".to_string(), "two".to_string(), "three".to_string()],
+        }];
+        let client = build_client(&config.request).unwrap();
+
+        let skipper = run(&config, &wordlists, client).await.unwrap();
+        server.await.unwrap();
+
+        assert!(skipper.is_none());
+        assert_eq!(
+            *seen_paths.lock().await,
+            vec!["/one", "/two", "/three", "/one", "/two", "/three"]
+        );
     }
 }

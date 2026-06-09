@@ -323,6 +323,13 @@ pub struct Cli {
     pub precheck_report_only: bool,
 
     #[arg(
+        long = "precheck-attempts",
+        default_value_t = 3,
+        help = "预检查轮询次数，按轮次遍历所有目标 / Precheck round count across all targets"
+    )]
+    pub precheck_attempts: usize,
+
+    #[arg(
         long = "no-progress",
         default_value_t = false,
         help = "禁用进度条 / Disable progress bar"
@@ -475,6 +482,7 @@ where
         "-precheck",
         "-precheck-key",
         "-precheck-report-only",
+        "-precheck-attempts",
         "-no-progress",
         "-stop-on-match",
         "-stop-scope",
@@ -518,6 +526,8 @@ mod tests {
             "-precheck-key".to_string(),
             "URLFUZZ".to_string(),
             "-precheck-report-only".to_string(),
+            "-precheck-attempts".to_string(),
+            "5".to_string(),
         ]);
 
         assert_eq!(
@@ -529,6 +539,8 @@ mod tests {
                 "--precheck-key",
                 "URLFUZZ",
                 "--precheck-report-only",
+                "--precheck-attempts",
+                "5",
             ]
         );
     }
