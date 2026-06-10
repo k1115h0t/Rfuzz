@@ -419,8 +419,14 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-ssl-verify` | 开关证书校验，默认 off。 | `-ssl-verify on` |
 | `-keepalive` | 开关 HTTP keep-alive。 | `-keepalive off` |
 | `-dns-cache` | 开关 DNS 缓存。 | `-dns-cache on` |
+| `-dns-cache-ttl` | 成功 DNS 缓存 TTL 秒数。 | `-dns-cache-ttl 300` |
+| `-dns-negative-cache-ttl` | DNS 失败缓存 TTL 秒数，`0` 表示禁用失败缓存。 | `-dns-negative-cache-ttl 30` |
+| `-dns-max-concurrent` | 最大并发真实 DNS 解析数。 | `-dns-max-concurrent 64` |
 | `-sni` | 兼容参数，当前不支持任意覆盖 SNI。 | `-sni example.com` |
 | `-cc` / `-ck` | 客户端证书和私钥。 | `-cc client.crt -ck client.key` |
+| `-ac` | 自动校准预留开关。 | `-ac` |
+| `-ac-scope` | 自动校准作用域预留参数：`host`、`job` 或 `global`。 | `-ac-scope job` |
+| `-ac-ignore` | 自动校准忽略 keyword 预留参数，可重复。 | `-ac-ignore URLFUZZ` |
 
 ### 匹配与过滤
 

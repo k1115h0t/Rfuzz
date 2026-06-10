@@ -419,8 +419,14 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-ssl-verify` | Toggles TLS certificate verification; default is off. | `-ssl-verify on` |
 | `-keepalive` | Toggles HTTP keep-alive. | `-keepalive off` |
 | `-dns-cache` | Toggles DNS cache. | `-dns-cache on` |
+| `-dns-cache-ttl` | Successful DNS cache TTL in seconds. | `-dns-cache-ttl 300` |
+| `-dns-negative-cache-ttl` | Failed DNS cache TTL in seconds; `0` disables negative caching. | `-dns-negative-cache-ttl 30` |
+| `-dns-max-concurrent` | Maximum concurrent real DNS lookups. | `-dns-max-concurrent 64` |
 | `-sni` | Compatibility option; arbitrary SNI override is not currently supported. | `-sni example.com` |
 | `-cc` / `-ck` | Client certificate and private key. | `-cc client.crt -ck client.key` |
+| `-ac` | Reserved auto-calibration switch. | `-ac` |
+| `-ac-scope` | Reserved auto-calibration scope: `host`, `job`, or `global`. | `-ac-scope job` |
+| `-ac-ignore` | Reserved auto-calibration ignored keyword, repeatable. | `-ac-ignore URLFUZZ` |
 
 ### Matching And Filtering
 
