@@ -389,8 +389,8 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-order` | clusterbomb 生成顺序。 | `-order USER,PASS,TARGET` |
 | `-schedule` | 请求生成调度。 | `-schedule rotate-window` |
 | `-target-key` | 轮转目标 keyword。 | `-target-key TARGET` |
-| `-target-window` | 每批轮转目标数量。 | `-target-window 100` |
-| `-target-burst` | 每个目标连续请求数。 | `-target-burst 3` |
+| `-target-window` | 每批轮转目标数量；默认值：`100`。 | `-target-window 100` |
+| `-target-burst` | 每个目标连续请求数；默认值：`3`。 | `-target-burst 3` |
 | `-e` | 给字典项追加扩展名。 | `-e .php,.bak` |
 | `-ic` | 忽略 `#` 开头注释行。 | `-ic` |
 | `-enc` | 对 keyword 应用编码链。 | `-enc 'DIR:urlencode'` |

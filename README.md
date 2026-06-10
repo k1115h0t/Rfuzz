@@ -389,8 +389,8 @@ This saves file descriptors, but HTTPS throughput can drop because TCP/TLS conne
 | `-order` | Clusterbomb generation order. | `-order USER,PASS,TARGET` |
 | `-schedule` | Request generation schedule. | `-schedule rotate-window` |
 | `-target-key` | Rotation target keyword. | `-target-key TARGET` |
-| `-target-window` | Targets per rotation window. | `-target-window 100` |
-| `-target-burst` | Consecutive requests per target. | `-target-burst 3` |
+| `-target-window` | Targets per rotation window; default: `100`. | `-target-window 100` |
+| `-target-burst` | Consecutive requests per target; default: `3`. | `-target-burst 3` |
 | `-e` | Append extensions to wordlist entries. | `-e .php,.bak` |
 | `-ic` | Ignore comment lines starting with `#`. | `-ic` |
 | `-enc` | Apply an encoder chain to a keyword. | `-enc 'DIR:urlencode'` |
