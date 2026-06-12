@@ -67,17 +67,29 @@ pub trait ResultWriter: Send {
 }
 
 pub fn build_writer(config: &OutputConfig) -> Result<Box<dyn ResultWriter>> {
-    match config.format {
-        OutputFormat::Console => Ok(Box::new(console::ConsoleWriter::new(
+    let writer: Box<dyn ResultWriter> = match config.format {
+        OutputFormat::Console => Box::new(console::ConsoleWriter::new(
             open_text_writer(config.path.as_deref())?,
             config.silent,
-        ))),
-        OutputFormat::Jsonl => Ok(Box::new(jsonl::JsonlWriter::new(open_text_writer(
+        )),
+        OutputFormat::Jsonl => Box::new(jsonl::JsonlWriter::new(open_text_writer(
             config.path.as_deref(),
-        )?))),
-        OutputFormat::Csv => Ok(Box::new(csv::CsvResultWriter::new(open_text_writer(
+        )?)),
+        OutputFormat::Csv => Box::new(csv::CsvResultWriter::new(open_text_writer(
             config.path.as_deref(),
-        )?))),
+        )?)),
+    };
+
+    if config.path.is_some() {
+        Ok(Box::new(MirroredResultWriter::new(
+            writer,
+            Box::new(console::ConsoleWriter::new(
+                open_stderr_writer(),
+                config.silent,
+            )),
+        )))
+    } else {
+        Ok(writer)
     }
 }
 
@@ -86,5 +98,34 @@ fn open_text_writer(path: Option<&str>) -> Result<Box<dyn Write + Send>> {
         Ok(Box::new(BufWriter::new(File::create(path)?)))
     } else {
         Ok(Box::new(BufWriter::new(io::stdout())))
+    }
+}
+
+fn open_stderr_writer() -> Box<dyn Write + Send> {
+    Box::new(BufWriter::new(io::stderr()))
+}
+
+struct MirroredResultWriter {
+    primary: Box<dyn ResultWriter>,
+    mirror: Box<dyn ResultWriter>,
+}
+
+impl MirroredResultWriter {
+    fn new(primary: Box<dyn ResultWriter>, mirror: Box<dyn ResultWriter>) -> Self {
+        Self { primary, mirror }
+    }
+}
+
+impl ResultWriter for MirroredResultWriter {
+    fn write_record(&mut self, record: &OutputRecord, raw: Option<&RawExchange>) -> Result<()> {
+        self.primary.write_record(record, raw)?;
+        self.mirror.write_record(record, raw)?;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.primary.flush()?;
+        self.mirror.flush()?;
+        Ok(())
     }
 }

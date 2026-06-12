@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -43,7 +43,7 @@ It is useful for:
 | Target rotation | `-schedule rotate-window` is designed for many URLs, users, and passwords without hammering one target continuously. |
 | Scope-level stop | `-stop-scope` plus `-stop-on-match` can skip remaining requests for a URL, user, or grouped combination after a hit. |
 | HTTP tuning | Supports proxies, redirects, HTTP/2, keep-alive, DNS cache, timeouts, delays, and global rate limits. |
-| Structured output | Supports console output, silent URL output, JSONL, CSV, raw request/response capture, and JSONL error logs. |
+| Structured output | Supports readable `[MATCH]` console lines, silent URL output, JSONL, CSV, raw request/response capture, and JSONL error logs. |
 
 ---
 
@@ -298,6 +298,14 @@ done/total | percent | matched | errors | skipped | err | ETA
 
 `ETA` is estimated from the recent real case completion rate. It includes practical runtime effects such as rate limiting, delays, skipped cases, matching, and output handling.
 
+When a response matches, console output shows the matched combination, final rendered URL, and response summary:
+
+```text
+[MATCH] PASS=admin,URLFUZZ=https://example.com,USER=alice -> https://example.com/login [Status: 200, Size: 12, Words: 2, Lines: 1, Time: 35ms]
+```
+
+If `-o` writes JSONL, CSV, or console output to a file, `rfuzz` still mirrors a concise `[MATCH]` line to `stderr` so matches are visible during the run. Silent mode (`-s`) still prints URLs only.
+
 Disable progress:
 
 ```bash
@@ -334,12 +342,12 @@ rfuzz -u https://TARGET/login \
 
 ### Concurrency And File Descriptors
 
-On Unix/Linux, `rfuzz` checks `ulimit -n` at startup and estimates whether the file descriptor limit can support the requested `-t` concurrency. If the limit is too low, it lowers the effective concurrency and prints a notice.
+On Unix/Linux, `rfuzz` checks `ulimit -n` at startup and estimates whether the current options can fit within the file descriptor limit. The estimate includes worker concurrency, DNS concurrency, output files, and the keep-alive connection pool that can build up during multi-target precheck/rotation. If the current value is too low, `rfuzz` prints the current value, the estimated required value, and the exact `ulimit` command to run before starting the job.
 
-Before large or highly concurrent jobs, consider:
+Before large or highly concurrent jobs, use the value printed by the startup warning:
 
 ```bash
-ulimit -n 8192
+ulimit -n <estimated-required-value>
 ```
 
 If the system does not allow a higher limit, lower `-t` or adjust the system/service hard limit.
@@ -467,7 +475,7 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 - HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, and global rate limiting.
 - Precheck: target payload reachability checks with round-based retries and report-only mode; failed payloads are skipped by default.
 - Matching/filtering: status, size, words, lines, response time, full raw response regex, and/or modes.
-- Output: console, silent URL, JSONL, CSV, raw request/response capture, and JSONL error logs.
+- Output: readable match lines, silent URL, JSONL, CSV, raw request/response capture, and JSONL error logs.
 - Stop control: `-stop-scope` plus `-stop-on-match`.
 
 ---

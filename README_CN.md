@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -43,7 +43,7 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 | 目标轮转 | `-schedule rotate-window` 适合多 URL、多账号、多密码场景，避免长时间打同一个目标。 |
 | scope 级停止 | `-stop-scope` + `-stop-on-match` 可以让某个 URL、用户或组合命中后提前跳过剩余请求。 |
 | HTTP 调优 | 支持代理、重定向、HTTP/2、keep-alive、DNS 缓存、超时、延迟、全局限速。 |
-| 结构化输出 | 支持 console、silent URL、JSONL、CSV、原始请求/响应保存和错误 JSONL 日志。 |
+| 结构化输出 | 支持可读的 `[MATCH]` 命中行、silent URL、JSONL、CSV、原始请求/响应保存和错误 JSONL 日志。 |
 
 ---
 
@@ -298,6 +298,14 @@ done/total | percent | matched | errors | skipped | err | ETA
 
 `ETA` 使用最近完成的真实 case 速度估算，会包含限速、延迟、跳过、匹配和输出写入带来的实际影响。
 
+响应命中时，console 输出会显示命中的组合、最终渲染 URL 和响应摘要：
+
+```text
+[MATCH] PASS=admin,URLFUZZ=https://example.com,USER=alice -> https://example.com/login [Status: 200, Size: 12, Words: 2, Lines: 1, Time: 35ms]
+```
+
+如果 `-o` 把 JSONL、CSV 或 console 输出写入文件，`rfuzz` 仍会把简洁的 `[MATCH]` 命中行同步打印到 `stderr`，方便运行时直接看到命中结果。静默模式（`-s`）仍保持只输出 URL。
+
 关闭进度条：
 
 ```bash
@@ -334,12 +342,12 @@ rfuzz -u https://TARGET/login \
 
 ### 并发与文件描述符
 
-Unix/Linux 下，`rfuzz` 启动时会检查 `ulimit -n`，并估算当前文件描述符上限是否足够支撑 `-t` 并发。如果上限太低，会自动下调实际并发并打印提示。
+Unix/Linux 下，`rfuzz` 启动时会检查 `ulimit -n`，并估算当前参数是否能放进文件描述符上限。估算会包含 worker 并发、DNS 并发、输出文件，以及多目标预检查/轮转时 keep-alive 连接池可能累积的连接数。如果当前值太低，`rfuzz` 会打印当前值、估算需要值，以及启动前应该执行的 `ulimit` 命令。
 
-大量目标或高并发任务前建议：
+大量目标或高并发任务前，按启动警告打印的估算值设置：
 
 ```bash
-ulimit -n 8192
+ulimit -n <估算需要值>
 ```
 
 如果系统不允许提高上限，就降低 `-t`，或通过系统/服务配置提高 hard limit。
@@ -467,7 +475,7 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 - HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速。
 - 预检查：目标 payload 连通性检查，支持按轮次重试、只报告模式，失败 payload 默认跳过。
 - 匹配/过滤：状态码、大小、单词数、行数、响应时间、完整 raw response 正则、and/or 组合。
-- 输出：console、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志。
+- 输出：可读命中行、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志。
 - 停止控制：`-stop-scope` + `-stop-on-match`。
 
 ---

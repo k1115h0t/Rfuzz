@@ -1,6 +1,6 @@
 [package]
 name = "rfuzz"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "A conservative Rust web fuzzer for authorized testing"
 license-file = "LICENSE"
