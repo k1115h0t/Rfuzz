@@ -206,7 +206,7 @@ fn finish_resolve(in_flight: &InFlightLookups, host: &str, notify: &Arc<Notify>)
 }
 
 fn boxed_dns_error(message: String) -> BoxedDnsError {
-    Box::new(io::Error::new(io::ErrorKind::Other, message))
+    Box::new(io::Error::other(message))
 }
 
 fn normalize_host(host: &str) -> String {

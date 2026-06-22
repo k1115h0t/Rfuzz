@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -18,7 +18,7 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 
 ## 这是什么？
 
-`rfuzz` 是一个轻量、可脚本化的 Web fuzzing 工具。它保留了常见 `ffuf` 使用习惯，同时针对大规模多目标任务补充了预检查、目标轮转、scope 级停止、DNS 缓存、错误日志和结构化输出能力。
+`rfuzz` 是一个轻量、可脚本化的 Web fuzzing 工具。它保留了常见 `ffuf` 使用习惯，同时针对大规模多目标任务补充了 dry-run 执行计划、预检查、目标轮转、scope 级停止、DNS 缓存、响应 body 限制、任务结束摘要、错误日志和结构化输出能力。
 
 适合用于：
 
@@ -42,8 +42,9 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 | 目标预检查 | `-precheck-key` 先探测目标是否可达，失败 payload 默认跳过。 |
 | 目标轮转 | `-schedule rotate-window` 适合多 URL、多账号、多密码场景，避免长时间打同一个目标。 |
 | scope 级停止 | `-stop-scope` + `-stop-on-match` 可以让某个 URL、用户或组合命中后提前跳过剩余请求。 |
+| dry-run 计划 | `-dry-run`、`-explain`、`-request-dry-run` 可以在发送任何网络请求前查看执行计划或最终请求。 |
 | HTTP 调优 | 支持代理、重定向、HTTP/2、keep-alive、DNS 缓存、超时、延迟、全局限速。 |
-| 结构化输出 | 支持可读的 `[MATCH]` 命中行、silent URL、JSONL、CSV、原始请求/响应保存和错误 JSONL 日志。 |
+| 结构化输出 | 支持可读的 `[MATCH]` 命中行、silent URL、JSONL、CSV、原始请求/响应保存、错误 JSONL 日志和 JSON 任务摘要。 |
 
 ---
 
@@ -141,6 +142,15 @@ rfuzz -request login.txt \
 ```
 
 `-request-proto` 只对 raw request 文件生效，不会给 `-u` 模板自动补协议。
+
+raw request 渲染会校验相对请求行必须有 `Host`，并在 placeholder 渲染后自动重算 `Content-Length`。如果只想查看最终请求而不发送：
+
+```bash
+rfuzz -request login.txt \
+  -request-proto https \
+  -w passwords.txt:PASS \
+  -request-dry-run
+```
 
 ---
 
@@ -284,6 +294,19 @@ rfuzz -u https://TARGET/login \
 
 `-stop-scope` 也可以和 `-order`、`rotate-window`、`precheck` 一起使用。达到停止阈值后，`rfuzz` 会快进跳过该 scope 的剩余组合。
 
+### Dry Run / 执行计划
+
+大任务开始前，可以用 dry-run 检查请求模板、placeholder、字典大小、预计请求数、并发、限速、预检查模式、输出路径、响应 body 限制，以及首个渲染后的最终请求：
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -fc 404 \
+  -dry-run
+```
+
+`-explain` 也是不发送网络请求的计划说明视图。
+
 ---
 
 ## 输出与进度
@@ -336,6 +359,14 @@ rfuzz -u https://TARGET/login \
   -error-log request_errors.jsonl
 ```
 
+任务结束时，`rfuzz` 会在 `stderr` 打印摘要：total、matched、filtered、error、skipped、主要错误分类、高频响应签名、输出路径，以及 `-stop-on-match` 是否真的触发。也可以保存为 JSON：
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -summary-json summary.json
+```
+
 ---
 
 ## 性能与稳定性建议
@@ -372,6 +403,23 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 
 这会更省 FD，但 HTTPS 吞吐可能下降，因为请求需要更频繁地重新建立 TCP/TLS 连接。
 
+### 响应 Body 限制
+
+`rfuzz` 不再无上限读取响应 body。默认每个响应最多读取 2 MiB，raw response 输出默认展示 4096 字节预览。目录枚举、二进制接口或大文件下载场景可以按需调整：
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -ignore-body
+```
+
+```bash
+rfuzz -w files.txt:FILE \
+  -u 'https://example.com/${{FILE}}$' \
+  -max-body 1048576 \
+  -body-preview 2048
+```
+
 ---
 
 ## 参数速查
@@ -383,6 +431,7 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-u` | URL 模板。 | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request 文件。 | `-request login.txt` |
 | `-request-proto` | raw request 协议。 | `-request-proto https` |
+| `-request-dry-run` | 渲染并打印首个最终请求，不发送请求。 | `-request-dry-run` |
 | `-X` | HTTP 方法。 | `-X POST` |
 | `-H` | Header 模板，可重复。 | `-H "Content-Type: application/json"` |
 | `-d` | 请求体模板。 | `-d 'q=${{FUZZ}}$'` |
@@ -414,6 +463,8 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-rate` | 全局每秒请求数，`0` 表示不限速。 | `-rate 50` |
 | `-timeout` | 请求超时秒数。 | `-timeout 10` |
 | `-p` | 请求间延迟或随机范围。 | `-p 0.1-0.5` |
+| `-dry-run` | 输出执行计划，不发送请求。 | `-dry-run` |
+| `-explain` | 解释执行计划，不发送请求。 | `-explain` |
 | `-no-progress` | 关闭进度条。 | `-no-progress` |
 | `-precheck` | 开关预检查。 | `-precheck off` |
 | `-precheck-key` | 目标预检查 keyword。 | `-precheck-key TARGET` |
@@ -432,6 +483,9 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-dns-max-concurrent` | 最大并发真实 DNS 解析数。 | `-dns-max-concurrent 64` |
 | `-sni` | 兼容参数，当前不支持任意覆盖 SNI。 | `-sni example.com` |
 | `-cc` / `-ck` | 客户端证书和私钥。 | `-cc client.crt -ck client.key` |
+| `-ignore-body` | 不读取响应 body，仍保留状态码和 header。 | `-ignore-body` |
+| `-max-body` | 每个响应最多读取的 body 字节数；默认值：`2097152`。 | `-max-body 1048576` |
+| `-body-preview` | raw response 中最多展示的 body 字节数；默认值：`4096`。 | `-body-preview 2048` |
 | `-ac` | 自动校准预留开关。 | `-ac` |
 | `-ac-scope` | 自动校准作用域预留参数：`host`、`job` 或 `global`。 | `-ac-scope job` |
 | `-ac-ignore` | 自动校准忽略 keyword 预留参数，可重复。 | `-ac-ignore URLFUZZ` |
@@ -461,6 +515,7 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 | `-s` | 静默模式，只输出 URL。 | `-s` |
 | `-od` | 保存命中请求/响应原文目录。 | `-od raw-results` |
 | `-error-log` | 保存失败请求 payload 日志。 | `-error-log errors.jsonl` |
+| `-summary-json` | 保存任务结束摘要 JSON。 | `-summary-json summary.json` |
 | `-stop-scope` | 停止计数的分组 key。 | `-stop-scope TARGET,USER` |
 | `-stop-on-match` | scope 命中 N 次后停止。 | `-stop-on-match 1` |
 
@@ -468,14 +523,14 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 
 ## 当前实现状态
 
-- CLI：请求、输入、执行、matcher/filter、输出、预算控制等主要参数。
-- 模板：`${{KEYWORD}}$` 原生占位符和裸 keyword 兼容。
+- CLI：请求、输入、执行、matcher/filter、输出、dry-run、body limit、summary、预算控制等主要参数。
+- 模板：`${{KEYWORD}}$` 原生占位符和裸 keyword 兼容，并在启动前校验未知 placeholder 和未使用的 wordlist keyword。
 - 输入模式：`clusterbomb`、`pitchfork`；`sniper` 当前降级为 pitchfork。
 - 调度：自定义 `-order`、`rotate-window` 目标轮转。
-- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速。
+- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速、raw request `Content-Length` 重算，以及有上限的响应 body 读取。
 - 预检查：目标 payload 连通性检查，支持按轮次重试、只报告模式，失败 payload 默认跳过。
 - 匹配/过滤：状态码、大小、单词数、行数、响应时间、完整 raw response 正则、and/or 组合。
-- 输出：可读命中行、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志。
+- 输出：可读命中行、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志和任务结束摘要。
 - 停止控制：`-stop-scope` + `-stop-on-match`。
 
 ---

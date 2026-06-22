@@ -1,22 +1,26 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fs::File;
+use std::io::BufWriter;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::config::{Config, FuzzMode, ScheduleMode};
+use crate::config::{Config, FuzzMode, ResponseBodyConfig, ScheduleMode};
 use crate::engine::precheck::{self, PrecheckSkipper};
 use crate::engine::progress::{ErrorKind, ProgressReporter};
 use crate::engine::rate_limiter::RateLimiter;
 use crate::engine::worker;
 use crate::http::client;
 use crate::http::client::build_client;
+use crate::http::request::RenderedRequest;
 use crate::input::modes::{
     clusterbomb, clusterbomb_ordered, clusterbomb_ordered_rotate_window, clusterbomb_rotate_window,
     pitchfork, InputCase, InputCases, ScopeCases,
 };
-use crate::input::wordlist::{load_wordlists, WordlistLoadOptions};
+use crate::input::wordlist::{load_wordlists, WordlistData, WordlistLoadOptions, WordlistSource};
 use crate::output::{
     build_writer, error_log::build_error_logger, error_log::ErrorLogger, raw::save_raw_exchange,
     OutputRecord, RawExchange,
@@ -39,6 +43,13 @@ pub async fn run(config: Config) -> Result<()> {
             extensions: config.input.extensions.clone(),
         },
     )?;
+    if config.execution.plan_only() {
+        let plan_wordlists = wordlists.clone();
+        let cases = build_input_cases(&config, wordlists)?;
+        print_execution_plan(&config, &plan_wordlists, cases)?;
+        return Ok(());
+    }
+
     let client = build_client(&config.request)?;
     let precheck_skipper = precheck::run(&config, &wordlists, client.clone()).await?;
     let precheck_skipped =
@@ -49,7 +60,101 @@ pub async fn run(config: Config) -> Result<()> {
         precheck_skipper
     };
 
-    let cases = match config.input.mode {
+    let cases = build_input_cases(&config, wordlists)?;
+
+    let total_cases = cases.total().saturating_add(precheck_skipped);
+    if total_cases == 0 {
+        return Err(anyhow!("no input cases generated"));
+    }
+
+    let replay_client = if let Some(replay_proxy) = &config.request.replay_proxy {
+        let mut replay_config = config.request.clone();
+        replay_config.proxy = Some(replay_proxy.clone());
+        replay_config.replay_proxy = None;
+        Some(build_client(&replay_config)?)
+    } else {
+        None
+    };
+    let limiter = RateLimiter::new(config.execution.rate_per_sec);
+    let writer = Arc::new(Mutex::new(build_writer(&config.output)?));
+    let error_logger = Arc::new(Mutex::new(build_error_logger(
+        config.output.error_log.as_deref(),
+    )?));
+    let matcher = Arc::new(config.matcher.clone());
+    let progress = ProgressReporter::new(total_cases, config.output.progress);
+    if precheck_skipped > 0 {
+        progress.record_skipped_by(precheck_skipped);
+    }
+    if cases.is_empty() {
+        progress.finish();
+        flush_writer(writer).await?;
+        flush_error_logger(error_logger).await?;
+        emit_summary(&config, &progress)?;
+        return Ok(());
+    }
+
+    if config.future.stop.stop_on_match.is_some() && !config.future.stop.stop_scope.is_empty() {
+        let result = if cases.scope_is_prefix(&config.future.stop.stop_scope) {
+            run_with_scoped_stop(
+                config.clone(),
+                cases,
+                client,
+                replay_client,
+                limiter,
+                writer.clone(),
+                error_logger.clone(),
+                matcher,
+                progress.clone(),
+                precheck_skipper.clone(),
+            )
+            .await
+        } else {
+            run_with_global_scoped_stop(
+                config.clone(),
+                cases,
+                client,
+                replay_client,
+                limiter,
+                writer.clone(),
+                error_logger.clone(),
+                matcher,
+                progress.clone(),
+                precheck_skipper.clone(),
+            )
+            .await
+        };
+        progress.finish();
+        let writer_flush_result = flush_writer(writer).await;
+        let flush_result = flush_error_logger(error_logger).await;
+        let summary_result = emit_summary(&config, &progress);
+        return result
+            .and(writer_flush_result)
+            .and(flush_result)
+            .and(summary_result);
+    }
+
+    run_with_case_queue(
+        config.clone(),
+        cases,
+        client,
+        replay_client,
+        limiter,
+        writer.clone(),
+        error_logger.clone(),
+        matcher,
+        progress.clone(),
+        precheck_skipper.clone(),
+    )
+    .await?;
+    progress.finish();
+    flush_writer(writer).await?;
+    flush_error_logger(error_logger).await?;
+    emit_summary(&config, &progress)?;
+    Ok(())
+}
+
+fn build_input_cases(config: &Config, wordlists: Vec<WordlistData>) -> Result<InputCases> {
+    Ok(match config.input.mode {
         FuzzMode::Sniper => {
             tracing::warn!("sniper mode is reserved; using pitchfork behavior for v0.1");
             pitchfork(wordlists, config.input.budget_requests)
@@ -83,7 +188,7 @@ pub async fn run(config: Config) -> Result<()> {
                 }
             } else if config.input.order.is_empty() {
                 clusterbomb(wordlists, config.input.budget_requests)?
-            } else if let Some(target_key) = ordered_schedule_target_key(&config) {
+            } else if let Some(target_key) = ordered_schedule_target_key(config) {
                 clusterbomb_ordered_rotate_window(
                     wordlists,
                     &config.input.order,
@@ -96,91 +201,246 @@ pub async fn run(config: Config) -> Result<()> {
                 clusterbomb_ordered(wordlists, &config.input.order, config.input.budget_requests)?
             }
         }
-    };
+    })
+}
 
-    let total_cases = cases.total().saturating_add(precheck_skipped);
-    if total_cases == 0 {
+fn print_execution_plan(
+    config: &Config,
+    wordlists: &[WordlistData],
+    mut cases: InputCases,
+) -> Result<()> {
+    let total = cases.total();
+    if total == 0 {
         return Err(anyhow!("no input cases generated"));
     }
 
-    let replay_client = if let Some(replay_proxy) = &config.request.replay_proxy {
-        let mut replay_config = config.request.clone();
-        replay_config.proxy = Some(replay_proxy.clone());
-        replay_config.replay_proxy = None;
-        Some(build_client(&replay_config)?)
-    } else {
-        None
-    };
-    let limiter = RateLimiter::new(config.execution.rate_per_sec);
-    let writer = Arc::new(Mutex::new(build_writer(&config.output)?));
-    let error_logger = Arc::new(Mutex::new(build_error_logger(
-        config.output.error_log.as_deref(),
-    )?));
-    let matcher = Arc::new(config.matcher.clone());
-    let progress = ProgressReporter::new(total_cases, config.output.progress);
-    if precheck_skipped > 0 {
-        progress.record_skipped_by(precheck_skipped);
+    let placeholders = request_placeholders(config);
+    eprintln!("Rfuzz dry run / 执行计划");
+    eprintln!("  mode / 模式: {}", mode_label(config.input.mode));
+    eprintln!(
+        "  schedule / 调度: {}",
+        schedule_label(config.execution.schedule.mode)
+    );
+    eprintln!("  estimated requests / 预计请求数: {}", total);
+    eprintln!("  concurrency / 并发: {}", config.execution.concurrency);
+    eprintln!(
+        "  rate limit / 限速: {}",
+        config
+            .execution
+            .rate_per_sec
+            .map(|rate| format!("{rate}/s"))
+            .unwrap_or_else(|| "unlimited / 不限".to_string())
+    );
+    eprintln!("  timeout / 超时: {}s", config.request.timeout.as_secs());
+    eprintln!(
+        "  precheck / 预检查: {}",
+        if config.precheck.enabled { "on" } else { "off" }
+    );
+    eprintln!(
+        "  output / 输出: {}",
+        config.output.path.as_deref().unwrap_or("stdout / 标准输出")
+    );
+    if let Some(path) = &config.output.summary_json {
+        eprintln!("  summary-json / 摘要 JSON: {path}");
     }
-    if cases.is_empty() {
-        progress.finish();
-        flush_writer(writer).await?;
-        flush_error_logger(error_logger).await?;
-        return Ok(());
-    }
-
-    if config.future.stop.stop_on_match.is_some() && !config.future.stop.stop_scope.is_empty() {
-        let result = if cases.scope_is_prefix(&config.future.stop.stop_scope) {
-            run_with_scoped_stop(
-                config,
-                cases,
-                client,
-                replay_client,
-                limiter,
-                writer.clone(),
-                error_logger.clone(),
-                matcher,
-                progress.clone(),
-                precheck_skipper.clone(),
-            )
-            .await
+    eprintln!(
+        "  response body / 响应 body: ignore={}, max={} bytes, preview={} bytes",
+        config.request.response_body.ignore,
+        config.request.response_body.max_bytes,
+        config.request.response_body.preview_bytes
+    );
+    eprintln!(
+        "  placeholders / 占位符: {}",
+        if placeholders.is_empty() {
+            "-".to_string()
         } else {
-            run_with_global_scoped_stop(
-                config,
-                cases,
-                client,
-                replay_client,
-                limiter,
-                writer.clone(),
-                error_logger.clone(),
-                matcher,
-                progress.clone(),
-                precheck_skipper.clone(),
-            )
-            .await
-        };
-        progress.finish();
-        let writer_flush_result = flush_writer(writer).await;
-        let flush_result = flush_error_logger(error_logger).await;
-        return result.and(writer_flush_result).and(flush_result);
+            placeholders.into_iter().collect::<Vec<_>>().join(",")
+        }
+    );
+    eprintln!("  wordlists / 字典:");
+    for (index, data) in wordlists.iter().enumerate() {
+        let source = config
+            .input
+            .wordlists
+            .get(index)
+            .map(|spec| wordlist_source_label(&spec.source))
+            .unwrap_or_else(|| "?".to_string());
+        eprintln!(
+            "    - {}: {} values from {}",
+            data.keyword,
+            data.values.len(),
+            source
+        );
     }
 
-    run_with_case_queue(
-        config,
-        cases,
-        client,
-        replay_client,
-        limiter,
-        writer.clone(),
-        error_logger.clone(),
-        matcher,
-        progress.clone(),
-        precheck_skipper.clone(),
-    )
-    .await?;
-    progress.finish();
-    flush_writer(writer).await?;
-    flush_error_logger(error_logger).await?;
+    if let Some(input) = cases.next() {
+        let render_values = config.input.encoders.apply_to_map(&input.values);
+        let rendered = RenderedRequest::from_config(&config.request, &render_values)?;
+        eprintln!("  first request / 首个最终请求:");
+        eprintln!("{}", rendered.raw.trim_end());
+    }
+
+    if config.request.raw_request.is_some() {
+        eprintln!(
+            "  note / 提示: raw request Content-Length will be recalculated after rendering."
+        );
+    }
+    if config.matcher.uses_response_body() && config.request.response_body.ignore {
+        eprintln!(
+            "  warning / 警告: regex match/filter is configured but -ignore-body is enabled."
+        );
+    }
     Ok(())
+}
+
+fn request_placeholders(config: &Config) -> BTreeSet<String> {
+    let mut placeholders = BTreeSet::new();
+    if let Some(url) = &config.request.url {
+        placeholders.extend(url.placeholders());
+    }
+    if let Some(raw_request) = &config.request.raw_request {
+        placeholders.extend(raw_request.placeholders());
+    }
+    for (_, template) in &config.request.headers {
+        placeholders.extend(template.placeholders());
+    }
+    for cookie in &config.request.cookies {
+        placeholders.extend(cookie.placeholders());
+    }
+    if let Some(body) = &config.request.body {
+        placeholders.extend(body.placeholders());
+    }
+    placeholders
+}
+
+fn wordlist_source_label(source: &WordlistSource) -> String {
+    match source {
+        WordlistSource::Path(path) => path.clone(),
+        WordlistSource::Stdin => "stdin".to_string(),
+    }
+}
+
+fn mode_label(mode: FuzzMode) -> &'static str {
+    match mode {
+        FuzzMode::Sniper => "sniper",
+        FuzzMode::Pitchfork => "pitchfork",
+        FuzzMode::Clusterbomb => "clusterbomb",
+    }
+}
+
+fn schedule_label(mode: ScheduleMode) -> &'static str {
+    match mode {
+        ScheduleMode::Default => "default",
+        ScheduleMode::RotateWindow => "rotate-window",
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RunSummary {
+    total: usize,
+    completed: usize,
+    requests: usize,
+    matched: usize,
+    filtered: usize,
+    errors: usize,
+    skipped: usize,
+    error_counts: crate::engine::progress::ErrorCounts,
+    top_signatures: Vec<crate::engine::progress::ResponseSignatureCount>,
+    output: Option<String>,
+    raw_output_directory: Option<String>,
+    error_log: Option<String>,
+    stop_on_match_triggered: bool,
+}
+
+fn emit_summary(config: &Config, progress: &ProgressReporter) -> Result<()> {
+    let snapshot = progress.snapshot();
+    let filtered = snapshot
+        .requests
+        .saturating_sub(snapshot.matched.saturating_add(snapshot.errors));
+    let summary = RunSummary {
+        total: snapshot.total,
+        completed: snapshot.completed,
+        requests: snapshot.requests,
+        matched: snapshot.matched,
+        filtered,
+        errors: snapshot.errors,
+        skipped: snapshot.skipped,
+        error_counts: snapshot.error_counts,
+        top_signatures: snapshot.top_signatures.clone(),
+        output: config.output.path.clone(),
+        raw_output_directory: config.output.output_directory.clone(),
+        error_log: config.output.error_log.clone(),
+        stop_on_match_triggered: snapshot.stop_on_match_triggered,
+    };
+
+    eprintln!("Rfuzz summary / 任务摘要");
+    eprintln!(
+        "  total={} matched={} filtered={} errors={} skipped={}",
+        summary.total, summary.matched, summary.filtered, summary.errors, summary.skipped
+    );
+    eprintln!(
+        "  error categories / 错误分类: {}",
+        format_error_counts(summary.error_counts)
+    );
+    eprintln!(
+        "  top response signatures / 高频响应签名: {}",
+        format_top_signatures(&summary.top_signatures)
+    );
+    eprintln!(
+        "  output / 输出文件: {}",
+        summary.output.as_deref().unwrap_or("stdout / 标准输出")
+    );
+    if let Some(path) = &summary.raw_output_directory {
+        eprintln!("  raw output / 原文输出目录: {path}");
+    }
+    if let Some(path) = &summary.error_log {
+        eprintln!("  error log / 错误日志: {path}");
+    }
+    eprintln!(
+        "  stop-on-match triggered / 命中停止触发: {}",
+        summary.stop_on_match_triggered
+    );
+
+    if let Some(path) = &config.output.summary_json {
+        let writer = BufWriter::new(File::create(path)?);
+        serde_json::to_writer_pretty(writer, &summary)?;
+        eprintln!("  summary json / 摘要 JSON: {path}");
+    }
+
+    Ok(())
+}
+
+fn format_error_counts(counts: crate::engine::progress::ErrorCounts) -> String {
+    let parts = counts.nonzero_parts();
+    if parts.is_empty() {
+        return "-".to_string();
+    }
+    parts
+        .into_iter()
+        .map(|(label, count)| format!("{label}:{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_top_signatures(signatures: &[crate::engine::progress::ResponseSignatureCount]) -> String {
+    if signatures.is_empty() {
+        return "-".to_string();
+    }
+    signatures
+        .iter()
+        .map(|signature| {
+            format!(
+                "{}x status={} size={} words={} lines={} hash={}",
+                signature.count,
+                signature.status,
+                signature.size,
+                signature.words,
+                signature.lines,
+                signature.body_hash
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn ordered_schedule_target_key(config: &Config) -> Option<&str> {
@@ -452,6 +712,7 @@ async fn next_unstopped_scope_case(
             false
         };
         if skip {
+            progress.record_stop_triggered();
             progress.record_skipped_by(1);
         } else {
             return Some(input);
@@ -489,7 +750,7 @@ fn spawn_case(
         .await
         {
             Ok(result) => {
-                let elapsed_ms = result.response.signature.elapsed_ms;
+                let signature = result.response.signature.clone();
                 let matched_input = result.input.clone();
                 match handle_match_result(
                     result,
@@ -506,7 +767,7 @@ fn spawn_case(
                                 scope_stop.lock().await.record_match(&matched_input);
                             }
                         }
-                        progress.record_response(matched, elapsed_ms);
+                        progress.record_response_signature(matched, &signature);
                     }
                     Err(error) => {
                         progress.record_error(ErrorKind::Other, 0);
@@ -617,6 +878,7 @@ async fn next_unstopped_case(
             continue;
         }
         if scope_stop.lock().await.should_skip(&input) {
+            progress.record_stop_triggered();
             progress.record_skipped_by(1);
         } else {
             return Some(input);
@@ -716,6 +978,7 @@ fn spawn_scope(
         let mut hits = 0usize;
         while let Some(input) = scope_cases.next() {
             if hits >= max_hits {
+                progress.record_stop_triggered();
                 progress.record_skipped_by(1 + scope_cases.len_remaining());
                 break;
             }
@@ -743,7 +1006,7 @@ fn spawn_scope(
             .await
             {
                 Ok(result) => {
-                    let elapsed_ms = result.response.signature.elapsed_ms;
+                    let signature = result.response.signature.clone();
                     let matched = handle_match_result(
                         result,
                         matcher.as_ref(),
@@ -752,7 +1015,7 @@ fn spawn_scope(
                         output_directory.clone(),
                     )
                     .await?;
-                    progress.record_response(matched, elapsed_ms);
+                    progress.record_response_signature(matched, &signature);
                     if matched {
                         hits += 1;
                     }
@@ -865,7 +1128,12 @@ async fn handle_match_result(
     }
     writer.lock().await.write_record(&record, Some(&raw))?;
     if let Some(replay_client) = replay_client {
-        let _ = client::execute(&replay_client, &result.rendered_request).await;
+        let _ = client::execute(
+            &replay_client,
+            &result.rendered_request,
+            ResponseBodyConfig::ignore(),
+        )
+        .await;
     }
     Ok(true)
 }

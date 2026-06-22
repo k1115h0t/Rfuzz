@@ -1,5 +1,8 @@
 use clap::{Parser, ValueEnum};
 
+pub const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub const DEFAULT_BODY_PREVIEW_BYTES: usize = 4096;
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "rfuzz",
@@ -155,6 +158,13 @@ pub struct Cli {
     pub request_proto: String,
 
     #[arg(
+        long = "request-dry-run",
+        default_value_t = false,
+        help = "渲染并打印首个最终请求，不发送网络请求 / Render and print the first final request without sending it"
+    )]
+    pub request_dry_run: bool,
+
+    #[arg(
         long = "replay-proxy",
         help = "命中后 replay 到代理 / Replay matched requests through proxy"
     )]
@@ -180,6 +190,20 @@ pub struct Cli {
         help = "请求超时秒数 / Request timeout in seconds"
     )]
     pub timeout_secs: u64,
+
+    #[arg(
+        long = "dry-run",
+        default_value_t = false,
+        help = "输出执行计划但不发送请求 / Print execution plan without sending requests"
+    )]
+    pub dry_run: bool,
+
+    #[arg(
+        long = "explain",
+        default_value_t = false,
+        help = "解释执行计划但不发送请求 / Explain execution plan without sending requests"
+    )]
+    pub explain: bool,
 
     #[arg(long = "mode", default_value_t = ModeArg::Clusterbomb, help = "多字典模式 / Multi-wordlist mode")]
     pub mode: ModeArg,
@@ -301,6 +325,33 @@ pub struct Cli {
         help = "保存请求失败 payload 日志 JSONL / Save failed request payload log as JSONL"
     )]
     pub error_log: Option<String>,
+
+    #[arg(
+        long = "ignore-body",
+        default_value_t = false,
+        help = "不读取响应 body，仅使用状态码和 header / Do not read response bodies; keep status and headers only"
+    )]
+    pub ignore_body: bool,
+
+    #[arg(
+        long = "max-body",
+        default_value_t = DEFAULT_MAX_BODY_BYTES,
+        help = "每个响应最多读取的 body 字节数 / Maximum response body bytes to read per response"
+    )]
+    pub max_body_bytes: usize,
+
+    #[arg(
+        long = "body-preview",
+        default_value_t = DEFAULT_BODY_PREVIEW_BYTES,
+        help = "raw response 输出中最多展示的 body 字节数 / Maximum body bytes shown in raw response output"
+    )]
+    pub body_preview_bytes: usize,
+
+    #[arg(
+        long = "summary-json",
+        help = "保存任务结束摘要 JSON / Save end-of-run summary JSON"
+    )]
+    pub summary_json: Option<String>,
 
     #[arg(
         long = "precheck",
@@ -458,7 +509,10 @@ where
         "-ck",
         "-request",
         "-request-proto",
+        "-request-dry-run",
         "-replay-proxy",
+        "-dry-run",
+        "-explain",
         "-ic",
         "-enc",
         "-mc",
@@ -479,6 +533,10 @@ where
         "-budget-requests",
         "-od",
         "-error-log",
+        "-ignore-body",
+        "-max-body",
+        "-body-preview",
+        "-summary-json",
         "-precheck",
         "-precheck-key",
         "-precheck-report-only",

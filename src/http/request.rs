@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 use crate::config::RequestConfig;
 use crate::http::raw_request::RawRequestTemplate;
@@ -52,6 +52,7 @@ impl RenderedRequest {
             .map(|template| template.render(input))
             .transpose()?
             .or(rendered.body);
+        let headers = normalize_content_length_headers(headers, body.as_deref());
 
         let raw = build_raw_request(&rendered.method, &rendered.url, &headers, body.as_deref());
 
@@ -73,10 +74,16 @@ fn render_raw_request(raw: &RawRequestTemplate, input: &InputMap) -> Result<Rend
         }
         headers.push((name.clone(), value));
     }
-    let host = host.unwrap_or_default();
     let url = if path.starts_with("http://") || path.starts_with("https://") {
         path
     } else {
+        let host = host
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "raw request missing Host header; add a Host header or use an absolute URL in the request line"
+                )
+            })?;
         format!("{}://{}{}", raw.scheme, host, path)
     };
     let body = raw
@@ -92,6 +99,20 @@ fn render_raw_request(raw: &RawRequestTemplate, input: &InputMap) -> Result<Rend
         body,
         raw: String::new(),
     })
+}
+
+fn normalize_content_length_headers(
+    headers: Vec<(String, String)>,
+    body: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut normalized = headers
+        .into_iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("content-length"))
+        .collect::<Vec<_>>();
+    if let Some(body) = body {
+        normalized.push(("Content-Length".to_string(), body.len().to_string()));
+    }
+    normalized
 }
 
 fn normalize_url(url: &str, raw_uri: bool) -> String {
@@ -163,5 +184,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.url, "https://example.com/admin");
+    }
+
+    #[test]
+    fn raw_request_requires_host_for_relative_paths() {
+        let keywords = BTreeSet::from(["DIR".to_string()]);
+        let raw = RawRequestTemplate {
+            method: Method::GET,
+            path: Template::compile("/${{DIR}}$", &keywords).unwrap(),
+            headers: Vec::new(),
+            body: None,
+            scheme: "https".to_string(),
+        };
+
+        let error = render_raw_request(
+            &raw,
+            &InputMap::from([("DIR".to_string(), "admin".to_string())]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing Host header"));
+    }
+
+    #[test]
+    fn recalculates_content_length_after_template_rendering() {
+        let keywords = BTreeSet::from(["PASS".to_string()]);
+        let raw = RawRequestTemplate {
+            method: Method::POST,
+            path: Template::compile("/login", &keywords).unwrap(),
+            headers: vec![
+                (
+                    "Host".to_string(),
+                    Template::compile("example.com", &keywords).unwrap(),
+                ),
+                (
+                    "Content-Length".to_string(),
+                    Template::compile("999", &keywords).unwrap(),
+                ),
+            ],
+            body: Some(Template::compile("password=${{PASS}}$", &keywords).unwrap()),
+            scheme: "https".to_string(),
+        };
+        let request_config = RequestConfig {
+            method: Method::GET,
+            url: None,
+            raw_request: Some(raw),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: None,
+            proxy: None,
+            replay_proxy: None,
+            timeout: std::time::Duration::from_secs(1),
+            follow_redirects: false,
+            raw_uri: false,
+            sni: None,
+            http2: false,
+            ssl_verify: false,
+            keepalive: true,
+            dns_cache: false,
+            dns_cache_ttl: std::time::Duration::from_secs(1),
+            dns_negative_cache_ttl: std::time::Duration::from_secs(0),
+            dns_max_concurrent: 1,
+            client_cert: None,
+            client_key: None,
+            response_body: crate::config::ResponseBodyConfig {
+                ignore: false,
+                max_bytes: 1024,
+                preview_bytes: 1024,
+            },
+        };
+
+        let rendered = RenderedRequest::from_config(
+            &request_config,
+            &InputMap::from([("PASS".to_string(), "secret".to_string())]),
+        )
+        .unwrap();
+
+        assert!(rendered.raw.contains("Content-Length: 15\r\n"));
+        assert!(!rendered.raw.contains("Content-Length: 999"));
     }
 }

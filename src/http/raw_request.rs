@@ -21,6 +21,17 @@ impl RawRequestTemplate {
             .with_context(|| format!("failed to read raw request file {}", path))?;
         parse_burp_request(&content, scheme, keywords)
     }
+
+    pub fn placeholders(&self) -> BTreeSet<String> {
+        let mut placeholders = self.path.placeholders();
+        for (_, template) in &self.headers {
+            placeholders.extend(template.placeholders());
+        }
+        if let Some(body) = &self.body {
+            placeholders.extend(body.placeholders());
+        }
+        placeholders
+    }
 }
 
 fn parse_burp_request(

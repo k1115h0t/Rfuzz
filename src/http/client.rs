@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use reqwest::Client;
 
-use crate::config::RequestConfig;
+use crate::config::{RequestConfig, ResponseBodyConfig};
 use crate::http::dns_cache::CachedResolver;
 use crate::http::request::RenderedRequest;
 use crate::http::response::{summarize, ResponseSummary};
@@ -54,7 +55,11 @@ pub fn build_client(config: &RequestConfig) -> Result<Client> {
     builder.build().context("failed to build HTTP client")
 }
 
-pub async fn execute(client: &Client, request: &RenderedRequest) -> Result<ResponseSummary> {
+pub async fn execute(
+    client: &Client,
+    request: &RenderedRequest,
+    body_config: ResponseBodyConfig,
+) -> Result<ResponseSummary> {
     let started = Instant::now();
     let mut builder = client.request(request.method.clone(), &request.url);
     for (name, value) in &request.headers {
@@ -66,12 +71,44 @@ pub async fn execute(client: &Client, request: &RenderedRequest) -> Result<Respo
 
     let response = builder.send().await?;
     let status = response.status().as_u16();
+    let version = response.version();
     let headers = response.headers().clone();
-    let body = response.bytes().await?;
+    let (body, body_truncated) = read_body_with_limit(response, body_config).await?;
     Ok(summarize(
         status,
+        version,
         &headers,
         body,
+        body_truncated,
+        body_config.preview_bytes,
         started.elapsed().as_millis(),
     ))
+}
+
+async fn read_body_with_limit(
+    mut response: reqwest::Response,
+    body_config: ResponseBodyConfig,
+) -> Result<(Bytes, bool)> {
+    let content_length = response.content_length();
+    if body_config.ignore || body_config.max_bytes == 0 {
+        return Ok((
+            Bytes::new(),
+            content_length.is_some_and(|length| length > 0),
+        ));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = body_config.max_bytes.saturating_sub(body.len());
+        if remaining == 0 {
+            return Ok((Bytes::from(body), true));
+        }
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            return Ok((Bytes::from(body), true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok((Bytes::from(body), false))
 }

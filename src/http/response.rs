@@ -9,15 +9,21 @@ use crate::matcher::signature::ResponseSignature;
 #[derive(Debug, Clone)]
 pub struct ResponseSummary {
     pub signature: ResponseSignature,
+    version: reqwest::Version,
     headers: reqwest::header::HeaderMap,
     body_text: String,
+    body_truncated: bool,
+    body_preview_bytes: usize,
     raw: Option<String>,
 }
 
 pub fn summarize(
     status: u16,
+    version: reqwest::Version,
     headers: &reqwest::header::HeaderMap,
     body: Bytes,
+    body_truncated: bool,
+    body_preview_bytes: usize,
     elapsed_ms: u128,
 ) -> ResponseSummary {
     let size = body.len();
@@ -45,8 +51,11 @@ pub fn summarize(
             title: None,
             body_hash,
         },
+        version,
         headers: headers.clone(),
         body_text,
+        body_truncated,
+        body_preview_bytes,
         raw: None,
     }
 }
@@ -56,8 +65,11 @@ impl ResponseSummary {
     pub fn from_parts(signature: ResponseSignature, raw: String) -> Self {
         Self {
             signature,
+            version: reqwest::Version::HTTP_11,
             headers: reqwest::header::HeaderMap::new(),
             body_text: String::new(),
+            body_truncated: false,
+            body_preview_bytes: usize::MAX,
             raw: Some(raw),
         }
     }
@@ -65,9 +77,12 @@ impl ResponseSummary {
     pub fn raw_response(&mut self) -> &str {
         if self.raw.is_none() {
             self.raw = Some(build_raw_response(
+                self.version,
                 self.signature.status,
                 &self.headers,
                 &self.body_text,
+                self.body_truncated,
+                self.body_preview_bytes,
             ));
         }
         self.raw.as_deref().unwrap_or_default()
@@ -76,9 +91,12 @@ impl ResponseSummary {
     pub fn signature_and_raw_response(&mut self) -> (&ResponseSignature, &str) {
         if self.raw.is_none() {
             self.raw = Some(build_raw_response(
+                self.version,
                 self.signature.status,
                 &self.headers,
                 &self.body_text,
+                self.body_truncated,
+                self.body_preview_bytes,
             ));
         }
         (&self.signature, self.raw.as_deref().unwrap_or_default())
@@ -91,8 +109,15 @@ impl ResponseSummary {
     }
 }
 
-fn build_raw_response(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> String {
-    let mut raw = format!("HTTP/1.1 {}\r\n", status);
+fn build_raw_response(
+    version: reqwest::Version,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+    body_truncated: bool,
+    body_preview_bytes: usize,
+) -> String {
+    let mut raw = format!("{:?} {}\r\n", version, status);
     for (name, value) in headers {
         raw.push_str(&canonical_header_name(name.as_str()));
         raw.push_str(": ");
@@ -100,8 +125,29 @@ fn build_raw_response(status: u16, headers: &reqwest::header::HeaderMap, body: &
         raw.push_str("\r\n");
     }
     raw.push_str("\r\n");
-    raw.push_str(body);
+    let (preview, preview_truncated) = body_preview(body, body_preview_bytes);
+    raw.push_str(preview);
+    if preview_truncated {
+        raw.push_str(&format!(
+            "\r\n[rfuzz: response body preview truncated at {} bytes]",
+            body_preview_bytes
+        ));
+    }
+    if body_truncated {
+        raw.push_str("\r\n[rfuzz: response body read stopped at max-body limit]");
+    }
     raw
+}
+
+fn body_preview(body: &str, limit: usize) -> (&str, bool) {
+    if body.len() <= limit {
+        return (body, false);
+    }
+    let mut end = limit.min(body.len());
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&body[..end], true)
 }
 
 fn canonical_header_name(name: &str) -> String {
@@ -152,10 +198,39 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(SET_COOKIE, HeaderValue::from_static("session_id=abc"));
 
-        let mut response = summarize(200, &headers, Bytes::from_static(b"ok"), 10);
+        let mut response = summarize(
+            200,
+            reqwest::Version::HTTP_11,
+            &headers,
+            Bytes::from_static(b"ok"),
+            false,
+            4096,
+            10,
+        );
 
         assert!(response
             .raw_response()
             .contains("Set-Cookie: session_id=abc"));
+    }
+
+    #[test]
+    fn raw_response_uses_response_version_and_preview_limit() {
+        let headers = HeaderMap::new();
+        let mut response = summarize(
+            200,
+            reqwest::Version::HTTP_2,
+            &headers,
+            Bytes::from_static(b"abcdef"),
+            true,
+            3,
+            10,
+        );
+
+        let raw = response.raw_response();
+
+        assert!(raw.starts_with("HTTP/2.0 200"));
+        assert!(raw.contains("abc"));
+        assert!(raw.contains("preview truncated"));
+        assert!(raw.contains("max-body"));
     }
 }

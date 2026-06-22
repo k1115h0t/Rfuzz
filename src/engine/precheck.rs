@@ -11,6 +11,8 @@ use crate::input::modes::InputCase;
 use crate::input::wordlist::WordlistData;
 use crate::template::render::InputMap;
 
+type PrecheckCaseResult = Result<Option<(String, Vec<String>)>>;
+
 #[derive(Debug)]
 pub struct PrecheckSkipper {
     key: String,
@@ -142,7 +144,7 @@ async fn run_url_precheck(
 }
 
 fn spawn_precheck_case(
-    join_set: &mut JoinSet<Result<Option<(String, Vec<String>)>>>,
+    join_set: &mut JoinSet<PrecheckCaseResult>,
     config: &Config,
     wordlists: Arc<Vec<WordlistData>>,
     key: &str,

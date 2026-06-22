@@ -29,13 +29,10 @@ pub struct WordlistLoadOptions {
 
 impl WordlistSpec {
     pub fn parse(raw: &str) -> Result<Self> {
-        let (source, keyword) = raw.rsplit_once(':').unwrap_or((raw, "FUZZ"));
+        let (source, keyword) = parse_source_and_keyword(raw)?;
 
         if source.is_empty() {
             return Err(anyhow!("wordlist source cannot be empty"));
-        }
-        if !is_valid_keyword(keyword) {
-            return Err(anyhow!("invalid wordlist keyword '{}'", keyword));
         }
 
         Ok(Self {
@@ -61,6 +58,28 @@ impl WordlistSpec {
             values,
         })
     }
+}
+
+fn parse_source_and_keyword(raw: &str) -> Result<(&str, &str)> {
+    let Some((source, keyword)) = raw.rsplit_once(':') else {
+        return Ok((raw, "FUZZ"));
+    };
+
+    if is_valid_keyword(keyword) {
+        return Ok((source, keyword));
+    }
+
+    if looks_like_windows_drive_path(source, keyword) {
+        return Ok((raw, "FUZZ"));
+    }
+
+    Err(anyhow!("invalid wordlist keyword '{}'", keyword))
+}
+
+fn looks_like_windows_drive_path(source: &str, suffix: &str) -> bool {
+    source.len() == 1
+        && source.as_bytes()[0].is_ascii_alphabetic()
+        && (suffix.starts_with('\\') || suffix.starts_with('/'))
 }
 
 pub fn load_wordlists(
@@ -108,5 +127,34 @@ mod tests {
         };
         let values = read_lines(Cursor::new("#c\nadmin\n"), &options).unwrap();
         assert_eq!(values, vec!["admin", "admin.php", "admin.txt"]);
+    }
+
+    #[test]
+    fn keeps_windows_drive_paths_as_default_fuzz_wordlists() {
+        let spec = WordlistSpec::parse(r"C:\wordlists\dirs.txt").unwrap();
+
+        assert_eq!(spec.keyword, "FUZZ");
+        assert_eq!(
+            spec.source,
+            WordlistSource::Path(r"C:\wordlists\dirs.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn still_accepts_explicit_keyword_after_windows_path() {
+        let spec = WordlistSpec::parse(r"C:\wordlists\dirs.txt:DIR").unwrap();
+
+        assert_eq!(spec.keyword, "DIR");
+        assert_eq!(
+            spec.source,
+            WordlistSource::Path(r"C:\wordlists\dirs.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_explicit_keyword() {
+        let error = WordlistSpec::parse("words.txt:bad").unwrap_err();
+
+        assert!(error.to_string().contains("invalid wordlist keyword"));
     }
 }

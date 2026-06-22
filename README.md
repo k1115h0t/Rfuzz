@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -18,7 +18,7 @@ A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style 
 
 ## What Is This?
 
-`rfuzz` is a lightweight, scriptable web fuzzing tool. It keeps familiar `ffuf`-style workflows while adding target prechecks, target rotation, scope-level stop controls, DNS caching, error logs, and structured output for large multi-target jobs.
+`rfuzz` is a lightweight, scriptable web fuzzing tool. It keeps familiar `ffuf`-style workflows while adding dry-run execution plans, target prechecks, target rotation, scope-level stop controls, DNS caching, response body limits, end-of-run summaries, error logs, and structured output for large multi-target jobs.
 
 It is useful for:
 
@@ -42,8 +42,9 @@ It is useful for:
 | Target precheck | `-precheck-key` probes target reachability before the full run; failed payloads are skipped by default. |
 | Target rotation | `-schedule rotate-window` is designed for many URLs, users, and passwords without hammering one target continuously. |
 | Scope-level stop | `-stop-scope` plus `-stop-on-match` can skip remaining requests for a URL, user, or grouped combination after a hit. |
+| Dry-run planning | `-dry-run`, `-explain`, and `-request-dry-run` show the rendered plan/request before any network traffic is sent. |
 | HTTP tuning | Supports proxies, redirects, HTTP/2, keep-alive, DNS cache, timeouts, delays, and global rate limits. |
-| Structured output | Supports readable `[MATCH]` console lines, silent URL output, JSONL, CSV, raw request/response capture, and JSONL error logs. |
+| Structured output | Supports readable `[MATCH]` console lines, silent URL output, JSONL, CSV, raw request/response capture, JSONL error logs, and JSON run summaries. |
 
 ---
 
@@ -141,6 +142,15 @@ rfuzz -request login.txt \
 ```
 
 `-request-proto` only applies to raw request files. It does not add a scheme to `-u` templates.
+
+Raw request rendering validates `Host` for relative request lines and recalculates `Content-Length` after placeholders are rendered. To inspect the final request without sending it:
+
+```bash
+rfuzz -request login.txt \
+  -request-proto https \
+  -w passwords.txt:PASS \
+  -request-dry-run
+```
 
 ---
 
@@ -284,6 +294,19 @@ rfuzz -u https://TARGET/login \
 
 `-stop-scope` can be combined with `-order`, `rotate-window`, and `precheck`. Once the threshold is reached, `rfuzz` fast-forwards through the remaining cases for that scope.
 
+### Dry Run / Explain Plan
+
+Before a large scan, use dry-run mode to verify the request template, placeholders, wordlist sizes, estimated request count, concurrency, rate limit, precheck mode, output paths, response body limits, and the first rendered request:
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -fc 404 \
+  -dry-run
+```
+
+`-explain` is an alias-style planning view for the same no-network safety check.
+
 ---
 
 ## Output And Progress
@@ -336,6 +359,14 @@ rfuzz -u https://TARGET/login \
   -error-log request_errors.jsonl
 ```
 
+At the end of a run, `rfuzz` prints a summary to `stderr` with total, matched, filtered, error, and skipped counts, top error categories, top response signatures, output paths, and whether `-stop-on-match` actually triggered. Save the same summary as JSON:
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -summary-json summary.json
+```
+
 ---
 
 ## Performance And Stability
@@ -372,6 +403,23 @@ rfuzz -u https://TARGET/login -w targets.txt:TARGET -keepalive off
 
 This saves file descriptors, but HTTPS throughput can drop because TCP/TLS connections are created more often.
 
+### Response Body Limits
+
+`rfuzz` no longer reads response bodies without a cap. By default each response body is limited to 2 MiB, and raw response output shows a 4096-byte preview. Tune this for directory fuzzing, binary endpoints, or huge downloads:
+
+```bash
+rfuzz -w dirs.txt:DIR \
+  -u 'https://example.com/${{DIR}}$' \
+  -ignore-body
+```
+
+```bash
+rfuzz -w files.txt:FILE \
+  -u 'https://example.com/${{FILE}}$' \
+  -max-body 1048576 \
+  -body-preview 2048
+```
+
 ---
 
 ## Option Reference
@@ -383,6 +431,7 @@ This saves file descriptors, but HTTPS throughput can drop because TCP/TLS conne
 | `-u` | URL template. | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request file. | `-request login.txt` |
 | `-request-proto` | Protocol for raw request files. | `-request-proto https` |
+| `-request-dry-run` | Renders and prints the first final request without sending it. | `-request-dry-run` |
 | `-X` | HTTP method. | `-X POST` |
 | `-H` | Header template, repeatable. | `-H "Content-Type: application/json"` |
 | `-d` | Request body template. | `-d 'q=${{FUZZ}}$'` |
@@ -414,6 +463,8 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-rate` | Global requests per second; `0` disables the limit. | `-rate 50` |
 | `-timeout` | Request timeout in seconds. | `-timeout 10` |
 | `-p` | Fixed or random request delay range. | `-p 0.1-0.5` |
+| `-dry-run` | Prints the execution plan without sending requests. | `-dry-run` |
+| `-explain` | Explains the execution plan without sending requests. | `-explain` |
 | `-no-progress` | Disables the progress bar. | `-no-progress` |
 | `-precheck` | Enables or disables precheck. | `-precheck off` |
 | `-precheck-key` | Target precheck keyword. | `-precheck-key TARGET` |
@@ -432,6 +483,9 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-dns-max-concurrent` | Maximum concurrent real DNS lookups. | `-dns-max-concurrent 64` |
 | `-sni` | Compatibility option; arbitrary SNI override is not currently supported. | `-sni example.com` |
 | `-cc` / `-ck` | Client certificate and private key. | `-cc client.crt -ck client.key` |
+| `-ignore-body` | Does not read response bodies; status and headers are still available. | `-ignore-body` |
+| `-max-body` | Maximum response body bytes read per response; default: `2097152`. | `-max-body 1048576` |
+| `-body-preview` | Maximum body bytes shown in raw response output; default: `4096`. | `-body-preview 2048` |
 | `-ac` | Reserved auto-calibration switch. | `-ac` |
 | `-ac-scope` | Reserved auto-calibration scope: `host`, `job`, or `global`. | `-ac-scope job` |
 | `-ac-ignore` | Reserved auto-calibration ignored keyword, repeatable. | `-ac-ignore URLFUZZ` |
@@ -461,6 +515,7 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 | `-s` | Silent mode, output URLs only. | `-s` |
 | `-od` | Directory for matched raw request/response captures. | `-od raw-results` |
 | `-error-log` | Saves failed request payload logs. | `-error-log errors.jsonl` |
+| `-summary-json` | Saves the end-of-run summary as JSON. | `-summary-json summary.json` |
 | `-stop-scope` | Grouping key for stop counters. | `-stop-scope TARGET,USER` |
 | `-stop-on-match` | Stops a scope after N matches. | `-stop-on-match 1` |
 
@@ -468,14 +523,14 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 
 ## Implementation Status
 
-- CLI: request, input, execution, matcher/filter, output, and request budget options.
-- Templates: native `${{KEYWORD}}$` placeholders and bare keyword compatibility.
+- CLI: request, input, execution, matcher/filter, output, dry-run, body-limit, summary, and request budget options.
+- Templates: native `${{KEYWORD}}$` placeholders and bare keyword compatibility, with startup validation for unknown placeholders and unused wordlist keywords.
 - Input modes: `clusterbomb`, `pitchfork`; `sniper` currently falls back to pitchfork.
 - Scheduling: custom `-order` and `rotate-window` target rotation.
-- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, and global rate limiting.
+- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, global rate limiting, raw request `Content-Length` recalculation, and bounded response body reads.
 - Precheck: target payload reachability checks with round-based retries and report-only mode; failed payloads are skipped by default.
 - Matching/filtering: status, size, words, lines, response time, full raw response regex, and/or modes.
-- Output: readable match lines, silent URL, JSONL, CSV, raw request/response capture, and JSONL error logs.
+- Output: readable match lines, silent URL, JSONL, CSV, raw request/response capture, JSONL error logs, and end-of-run summaries.
 - Stop control: `-stop-scope` plus `-stop-on-match`.
 
 ---

@@ -46,6 +46,24 @@ pub struct RequestConfig {
     pub dns_max_concurrent: usize,
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
+    pub response_body: ResponseBodyConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseBodyConfig {
+    pub ignore: bool,
+    pub max_bytes: usize,
+    pub preview_bytes: usize,
+}
+
+impl ResponseBodyConfig {
+    pub fn ignore() -> Self {
+        Self {
+            ignore: true,
+            max_bytes: 0,
+            preview_bytes: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +91,7 @@ pub struct OutputConfig {
     pub silent: bool,
     pub output_directory: Option<String>,
     pub error_log: Option<String>,
+    pub summary_json: Option<String>,
     pub progress: bool,
 }
 
@@ -89,6 +108,15 @@ pub struct ExecutionConfig {
     pub rate_per_sec: Option<u64>,
     pub delay: DelayConfig,
     pub schedule: ScheduleConfig,
+    pub dry_run: bool,
+    pub explain: bool,
+    pub request_dry_run: bool,
+}
+
+impl ExecutionConfig {
+    pub fn plan_only(&self) -> bool {
+        self.dry_run || self.explain || self.request_dry_run
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +220,13 @@ impl TryFrom<Cli> for Config {
         }
 
         let matcher = MatcherConfig::from_cli(&cli)?;
+        if cli.ignore_body && matcher.uses_response_body() {
+            tracing::warn!(
+                "-ignore-body is enabled while regex matchers/filters need the response body; regex rules will only see headers"
+            );
+        }
+        let encoders = EncoderSet::parse(&cli.encoders)?;
+        encoders.validate_keywords(&keywords)?;
 
         let url = cli
             .url
@@ -221,6 +256,16 @@ impl TryFrom<Cli> for Config {
             .as_ref()
             .map(|body| Template::compile(body, &keywords).context("invalid body template"))
             .transpose()?;
+        warn_unused_wordlist_keywords(
+            &wordlists,
+            &request_placeholders(
+                url.as_ref(),
+                raw_request.as_ref(),
+                &headers,
+                &cookies,
+                body.as_ref(),
+            ),
+        );
         let stop_scope = parse_keyword_list(&cli.stop_scope);
         validate_keywords_exist("-stop-scope", &stop_scope, &keywords)?;
         let precheck = PrecheckConfig {
@@ -257,6 +302,11 @@ impl TryFrom<Cli> for Config {
             dns_max_concurrent: cli.dns_max_concurrent.max(1),
             client_cert: cli.client_cert,
             client_key: cli.client_key,
+            response_body: ResponseBodyConfig {
+                ignore: cli.ignore_body,
+                max_bytes: cli.max_body_bytes,
+                preview_bytes: cli.body_preview_bytes,
+            },
         };
 
         let future = FutureConfig {
@@ -289,7 +339,7 @@ impl TryFrom<Cli> for Config {
                 budget_requests: cli.budget_requests,
                 extensions: parse_extensions(cli.extensions.as_deref()),
                 ignore_wordlist_comments: cli.ignore_wordlist_comments,
-                encoders: EncoderSet::parse(&cli.encoders)?,
+                encoders,
             },
             matcher,
             output: OutputConfig {
@@ -302,6 +352,7 @@ impl TryFrom<Cli> for Config {
                 silent: cli.silent,
                 output_directory: cli.output_directory,
                 error_log: cli.error_log,
+                summary_json: cli.summary_json,
                 progress: !cli.no_progress,
             },
             execution: ExecutionConfig {
@@ -309,6 +360,9 @@ impl TryFrom<Cli> for Config {
                 rate_per_sec: (cli.rate > 0).then_some(cli.rate),
                 delay: DelayConfig::parse(cli.delay.as_deref())?,
                 schedule,
+                dry_run: cli.dry_run,
+                explain: cli.explain,
+                request_dry_run: cli.request_dry_run,
             },
             precheck,
             future,
@@ -339,6 +393,43 @@ fn parse_keyword_list(values: &[String]) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn request_placeholders(
+    url: Option<&Template>,
+    raw_request: Option<&RawRequestTemplate>,
+    headers: &[(String, Template)],
+    cookies: &[Template],
+    body: Option<&Template>,
+) -> BTreeSet<String> {
+    let mut placeholders = BTreeSet::new();
+    if let Some(url) = url {
+        placeholders.extend(url.placeholders());
+    }
+    if let Some(raw_request) = raw_request {
+        placeholders.extend(raw_request.placeholders());
+    }
+    for (_, template) in headers {
+        placeholders.extend(template.placeholders());
+    }
+    for cookie in cookies {
+        placeholders.extend(cookie.placeholders());
+    }
+    if let Some(body) = body {
+        placeholders.extend(body.placeholders());
+    }
+    placeholders
+}
+
+fn warn_unused_wordlist_keywords(wordlists: &[WordlistSpec], placeholders: &BTreeSet<String>) {
+    for wordlist in wordlists {
+        if !placeholders.contains(&wordlist.keyword) {
+            tracing::warn!(
+                "wordlist keyword '{}' is not used by any request template",
+                wordlist.keyword
+            );
+        }
+    }
 }
 
 fn parse_keyword_order(raw: Option<&str>, wordlists: &[WordlistSpec]) -> Result<Vec<String>> {

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
@@ -34,6 +34,15 @@ impl EncoderSet {
             chains.insert(keyword.to_string(), encoders);
         }
         Ok(Self { chains })
+    }
+
+    pub fn validate_keywords(&self, known_keywords: &BTreeSet<String>) -> Result<()> {
+        for keyword in self.chains.keys() {
+            if !known_keywords.contains(keyword) {
+                return Err(anyhow!("-enc references unknown keyword: {}", keyword));
+            }
+        }
+        Ok(())
     }
 
     pub fn apply_to_map(

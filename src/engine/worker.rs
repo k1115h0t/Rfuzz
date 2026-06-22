@@ -52,7 +52,7 @@ pub async fn execute_case(
     let url = rendered.url.clone();
     let request_raw = rendered.raw.clone();
     let started = Instant::now();
-    let response = client::execute(&client, &rendered)
+    let response = client::execute(&client, &rendered, request_config.response_body)
         .await
         .map_err(|error| WorkerError {
             input: input.clone(),

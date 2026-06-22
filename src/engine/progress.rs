@@ -1,8 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use serde::Serialize;
+
+use crate::matcher::signature::ResponseSignature;
 
 const ETA_WINDOW_SECS: f64 = 5.0;
 
@@ -18,7 +21,7 @@ pub enum ErrorKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ErrorCounts {
     pub timeout: usize,
     pub dns: usize,
@@ -44,7 +47,7 @@ impl ErrorCounts {
         }
     }
 
-    fn nonzero_parts(&self) -> Vec<(&'static str, usize)> {
+    pub fn nonzero_parts(&self) -> Vec<(&'static str, usize)> {
         [
             ("timeout", self.timeout),
             ("dns", self.dns),
@@ -61,7 +64,38 @@ impl ErrorCounts {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResponseSignatureCount {
+    pub status: u16,
+    pub size: usize,
+    pub words: usize,
+    pub lines: usize,
+    pub body_hash: u64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ResponseSignatureKey {
+    status: u16,
+    size: usize,
+    words: usize,
+    lines: usize,
+    body_hash: u64,
+}
+
+impl From<&ResponseSignature> for ResponseSignatureKey {
+    fn from(signature: &ResponseSignature) -> Self {
+        Self {
+            status: signature.status,
+            size: signature.size,
+            words: signature.words,
+            lines: signature.lines,
+            body_hash: signature.body_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProgressSnapshot {
     pub total: usize,
     pub completed: usize,
@@ -70,6 +104,8 @@ pub struct ProgressSnapshot {
     pub errors: usize,
     pub skipped: usize,
     pub error_counts: ErrorCounts,
+    pub top_signatures: Vec<ResponseSignatureCount>,
+    pub stop_on_match_triggered: bool,
     pub eta_secs: Option<u64>,
 }
 
@@ -88,6 +124,8 @@ pub struct ProgressState {
     errors: usize,
     skipped: usize,
     error_counts: ErrorCounts,
+    signature_counts: BTreeMap<ResponseSignatureKey, usize>,
+    stop_on_match_triggered: bool,
     samples: VecDeque<ProgressSample>,
 }
 
@@ -101,6 +139,8 @@ impl ProgressState {
             errors: 0,
             skipped: 0,
             error_counts: ErrorCounts::default(),
+            signature_counts: BTreeMap::new(),
+            stop_on_match_triggered: false,
             samples: VecDeque::new(),
         }
     }
@@ -113,6 +153,14 @@ impl ProgressState {
         }
     }
 
+    pub fn record_response_signature(&mut self, matched: bool, signature: &ResponseSignature) {
+        self.record_response(matched, signature.elapsed_ms);
+        *self
+            .signature_counts
+            .entry(ResponseSignatureKey::from(signature))
+            .or_default() += 1;
+    }
+
     pub fn record_error(&mut self, kind: ErrorKind, _elapsed_ms: u128) {
         self.completed += 1;
         self.requests += 1;
@@ -123,6 +171,10 @@ impl ProgressState {
     pub fn record_skipped_by(&mut self, count: usize) {
         self.completed += count;
         self.skipped += count;
+    }
+
+    pub fn record_stop_triggered(&mut self) {
+        self.stop_on_match_triggered = true;
     }
 
     pub fn snapshot(&mut self, elapsed_secs: f64) -> ProgressSnapshot {
@@ -138,8 +190,45 @@ impl ProgressState {
             errors: self.errors,
             skipped: self.skipped,
             error_counts: self.error_counts,
+            top_signatures: self.top_signatures(),
+            stop_on_match_triggered: self.stop_on_match_triggered,
             eta_secs,
         }
+    }
+
+    fn top_signatures(&self) -> Vec<ResponseSignatureCount> {
+        let mut counts = self
+            .signature_counts
+            .iter()
+            .map(|(key, count)| ResponseSignatureCount {
+                status: key.status,
+                size: key.size,
+                words: key.words,
+                lines: key.lines,
+                body_hash: key.body_hash,
+                count: *count,
+            })
+            .collect::<Vec<_>>();
+        counts.sort_by(|left, right| {
+            right.count.cmp(&left.count).then_with(|| {
+                (
+                    left.status,
+                    left.size,
+                    left.words,
+                    left.lines,
+                    left.body_hash,
+                )
+                    .cmp(&(
+                        right.status,
+                        right.size,
+                        right.words,
+                        right.lines,
+                        right.body_hash,
+                    ))
+            })
+        });
+        counts.truncate(5);
+        counts
     }
 
     fn record_sample(&mut self, elapsed_secs: f64) {
@@ -150,7 +239,7 @@ impl ProgressState {
         let should_record = self
             .samples
             .back()
-            .map_or(true, |sample| sample.completed != self.completed);
+            .is_none_or(|sample| sample.completed != self.completed);
         if !should_record {
             return;
         }
@@ -229,8 +318,8 @@ impl ProgressReporter {
         reporter
     }
 
-    pub fn record_response(&self, matched: bool, elapsed_ms: u128) {
-        self.update(|state| state.record_response(matched, elapsed_ms));
+    pub fn record_response_signature(&self, matched: bool, signature: &ResponseSignature) {
+        self.update(|state| state.record_response_signature(matched, signature));
     }
 
     pub fn record_error(&self, kind: ErrorKind, elapsed_ms: u128) {
@@ -239,6 +328,15 @@ impl ProgressReporter {
 
     pub fn record_skipped_by(&self, count: usize) {
         self.update(|state| state.record_skipped_by(count));
+    }
+
+    pub fn record_stop_triggered(&self) {
+        self.update(|state| state.record_stop_triggered());
+    }
+
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        let mut state = self.inner.state.lock().expect("progress state poisoned");
+        state.snapshot(self.inner.started.elapsed().as_secs_f64())
     }
 
     pub fn finish(&self) {
@@ -376,6 +474,8 @@ mod tests {
             errors: 3,
             skipped: 4,
             error_counts,
+            top_signatures: Vec::new(),
+            stop_on_match_triggered: false,
             eta_secs: Some(65),
         });
 
