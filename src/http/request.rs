@@ -115,7 +115,7 @@ fn normalize_content_length_headers(
     normalized
 }
 
-fn normalize_url(url: &str, raw_uri: bool) -> String {
+pub(crate) fn normalize_url(url: &str, raw_uri: bool) -> String {
     if raw_uri {
         return url.to_string();
     }

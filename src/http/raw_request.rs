@@ -39,10 +39,8 @@ fn parse_burp_request(
     scheme: &str,
     keywords: &BTreeSet<String>,
 ) -> Result<RawRequestTemplate> {
-    let normalized = content.replace("\r\n", "\n");
-    let (head, body) = normalized
-        .split_once("\n\n")
-        .map_or((normalized.as_str(), ""), |(head, body)| (head, body));
+    let (head, body) = split_header_body(content);
+    let head = head.replace("\r\n", "\n");
     let mut lines = head.lines();
     let request_line = lines
         .next()
@@ -80,6 +78,16 @@ fn parse_burp_request(
     })
 }
 
+fn split_header_body(content: &str) -> (&str, &str) {
+    if let Some((head, body)) = content.split_once("\r\n\r\n") {
+        (head, body)
+    } else if let Some((head, body)) = content.split_once("\n\n") {
+        (head, body)
+    } else {
+        (content, "")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -98,6 +106,19 @@ mod tests {
         assert_eq!(
             parsed.body.unwrap().render(&input).unwrap(),
             "password=secret"
+        );
+    }
+
+    #[test]
+    fn preserves_body_crlf_when_parsing_burp_request() {
+        let keywords = BTreeSet::new();
+        let raw = "POST /upload HTTP/1.1\r\nHost: example.com\r\n\r\nline1\r\nline2\r\n";
+        let parsed = parse_burp_request(raw, "https", &keywords).unwrap();
+        let input = InputMap::new();
+
+        assert_eq!(
+            parsed.body.unwrap().render(&input).unwrap(),
+            "line1\r\nline2\r\n"
         );
     }
 }

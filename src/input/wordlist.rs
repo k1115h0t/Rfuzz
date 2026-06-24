@@ -73,7 +73,11 @@ fn parse_source_and_keyword(raw: &str) -> Result<(&str, &str)> {
         return Ok((raw, "FUZZ"));
     }
 
-    Err(anyhow!("invalid wordlist keyword '{}'", keyword))
+    Err(anyhow!(
+        "invalid wordlist keyword '{}'; if this is a path containing ':', pass an explicit keyword such as '{}:FUZZ'",
+        keyword,
+        raw
+    ))
 }
 
 fn looks_like_windows_drive_path(source: &str, suffix: &str) -> bool {

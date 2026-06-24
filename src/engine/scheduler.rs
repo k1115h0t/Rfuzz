@@ -188,15 +188,6 @@ fn build_input_cases(config: &Config, wordlists: Vec<WordlistData>) -> Result<In
                 }
             } else if config.input.order.is_empty() {
                 clusterbomb(wordlists, config.input.budget_requests)?
-            } else if let Some(target_key) = ordered_schedule_target_key(config) {
-                clusterbomb_ordered_rotate_window(
-                    wordlists,
-                    &config.input.order,
-                    target_key,
-                    config.execution.schedule.target_window,
-                    config.execution.schedule.target_burst,
-                    config.input.budget_requests,
-                )?
             } else {
                 clusterbomb_ordered(wordlists, &config.input.order, config.input.budget_requests)?
             }
@@ -441,16 +432,6 @@ fn format_top_signatures(signatures: &[crate::engine::progress::ResponseSignatur
         })
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-fn ordered_schedule_target_key(config: &Config) -> Option<&str> {
-    config
-        .execution
-        .schedule
-        .target_key
-        .as_deref()
-        .or(config.precheck.key.as_deref())
-        .or_else(|| config.future.stop.stop_scope.first().map(String::as_str))
 }
 
 fn next_precheck_case(
@@ -1288,6 +1269,38 @@ mod tests {
 
         assert_eq!(skipped, 8);
         assert_eq!(wordlists[0].values, vec!["u2"]);
+    }
+
+    #[test]
+    fn ordered_clusterbomb_with_precheck_does_not_rotate_without_schedule() {
+        let cli = crate::cli::Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://TARGET/login",
+            "-w",
+            "targets.txt:TARGET",
+            "-w",
+            "users.txt:USER",
+            "-w",
+            "passes.txt:PASS",
+            "--order",
+            "TARGET,USER,PASS",
+            "--precheck-key",
+            "TARGET",
+        ]);
+        let config = Config::try_from(cli).unwrap();
+        let cases = build_input_cases(
+            &config,
+            vec![
+                wl("TARGET", &["a.com", "b.com"]),
+                wl("USER", &["alice", "bob"]),
+                wl("PASS", &["123456", "admin"]),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(config.execution.schedule.mode, ScheduleMode::Default);
+        assert!(cases.scope_is_prefix(&["TARGET".to_string()]));
     }
 
     #[test]

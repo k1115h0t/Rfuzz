@@ -134,13 +134,13 @@ pub struct Cli {
 
     #[arg(
         long = "cc",
-        help = "客户端证书 PEM 路径 / Client certificate PEM path"
+        help = "客户端证书 PEM 路径，需和 --ck 一起使用 / Client certificate PEM path, use with --ck"
     )]
     pub client_cert: Option<String>,
 
     #[arg(
         long = "ck",
-        help = "客户端私钥 PEM 路径 / Client private key PEM path"
+        help = "客户端私钥 PEM 路径，需和 --cc 一起使用 / Client private key PEM path, use with --cc"
     )]
     pub client_key: Option<String>,
 
@@ -153,7 +153,7 @@ pub struct Cli {
     #[arg(
         long = "request-proto",
         default_value = "https",
-        help = "raw request 使用的协议 / Protocol for raw request"
+        help = "raw request 使用的协议，仅 http/https / Protocol for raw request, http/https only"
     )]
     pub request_proto: String,
 
@@ -303,7 +303,7 @@ pub struct Cli {
 
     #[arg(
         short = 'p',
-        help = "请求间延迟或随机范围 / Delay or random delay range between requests"
+        help = "请求间有限延迟或随机范围 / Finite delay or random delay range between requests"
     )]
     pub delay: Option<String>,
 

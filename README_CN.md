@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -141,9 +141,9 @@ rfuzz -request login.txt \
   -fc 401
 ```
 
-`-request-proto` 只对 raw request 文件生效，不会给 `-u` 模板自动补协议。
+`-request-proto` 只对 raw request 文件生效，不会给 `-u` 模板自动补协议；取值只能是 `http` 或 `https`。
 
-raw request 渲染会校验相对请求行必须有 `Host`，并在 placeholder 渲染后自动重算 `Content-Length`。如果只想查看最终请求而不发送：
+raw request 渲染会校验相对请求行必须有 `Host`，并在 placeholder 渲染后自动重算 `Content-Length`。v0.1.9 起，解析 Burp raw request 时会保留 body 内部的 CRLF 换行；但 `-request` 仍面向文本型 raw request，不保证保留二进制 body。如果只想查看最终请求而不发送：
 
 ```bash
 rfuzz -request login.txt \
@@ -244,7 +244,7 @@ rfuzz -u https://TARGET/login \
   -precheck-key TARGET
 ```
 
-预检查只遍历 `-precheck-key` 对应 payload，不会组合其他字典。只要能收到 HTTP 响应，就视为目标可达；`200`、`301`、`401`、`403`、`404`、`500` 等状态码都算可达。
+预检查只遍历 `-precheck-key` 对应 payload，不会组合其他字典。预检查 URL 会和主请求一样应用 `-enc` 编码链，并使用同样的 URL 空格归一化逻辑。只要能收到 HTTP 响应，就视为目标可达；`200`、`301`、`401`、`403`、`404`、`500` 等状态码都算可达。
 
 关闭预检查：
 
@@ -357,6 +357,8 @@ rfuzz -u https://TARGET/login \
 ```
 
 `-stop-scope` 也可以和 `-order`、`rotate-window`、`precheck` 一起使用。达到停止阈值后，`rfuzz` 会快进跳过相同分组键的剩余组合。
+
+注意：`-stop-on-match` 不会撤回已经发出的请求。在高并发或 `rotate-window` 调度下，某个分组命中后，`rfuzz` 会停止调度新的同分组请求，但已经在飞的同分组请求仍可能完成。
 
 ### 安全预演：dry-run / explain / request-dry-run
 
@@ -494,7 +496,7 @@ rfuzz -w files.txt:FILE \
 | --- | --- | --- |
 | `-u` | URL 模板。 | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request 文件。 | `-request login.txt` |
-| `-request-proto` | raw request 协议。 | `-request-proto https` |
+| `-request-proto` | raw request 协议，只接受 `http` / `https`。 | `-request-proto https` |
 | `-request-dry-run` | 安全预演 raw request：渲染并打印首个最终请求，不发送请求。 | `-request-dry-run` |
 | `-X` | HTTP 方法。 | `-X POST` |
 | `-H` | Header 模板，可重复。 | `-H "Content-Type: application/json"` |
@@ -526,7 +528,7 @@ rfuzz -w files.txt:FILE \
 | `-t` | 并发 worker 数。 | `-t 100` |
 | `-rate` | 全局每秒请求数，`0` 表示不限速。 | `-rate 50` |
 | `-timeout` | 请求超时秒数。 | `-timeout 10` |
-| `-p` | 请求间延迟或随机范围。 | `-p 0.1-0.5` |
+| `-p` | 请求间有限延迟或随机范围；拒绝 NaN/inf。 | `-p 0.1-0.5` |
 | `-dry-run` | 安全预演：输出计划和首个渲染请求，不发送请求。 | `-dry-run` |
 | `-explain` | 解释安全预演计划，不发送请求。 | `-explain` |
 | `-no-progress` | 关闭进度条。 | `-no-progress` |
@@ -546,7 +548,7 @@ rfuzz -w files.txt:FILE \
 | `-dns-negative-cache-ttl` | DNS 失败缓存 TTL 秒数，`0` 表示禁用失败缓存。 | `-dns-negative-cache-ttl 30` |
 | `-dns-max-concurrent` | 最大并发真实 DNS 解析数。 | `-dns-max-concurrent 64` |
 | `-sni` | 兼容参数，当前不支持任意覆盖 SNI。 | `-sni example.com` |
-| `-cc` / `-ck` | 客户端证书和私钥。 | `-cc client.crt -ck client.key` |
+| `-cc` / `-ck` | 客户端证书和私钥，必须成对提供。 | `-cc client.crt -ck client.key` |
 | `-ignore-body` | 不读取响应 body，仍保留状态码和 header。 | `-ignore-body` |
 | `-max-body` | 每个响应最多读取的 body 字节数；默认值：`2097152`。 | `-max-body 1048576` |
 | `-body-preview` | raw response 中最多展示的 body 字节数；默认值：`4096`。 | `-body-preview 2048` |
@@ -581,7 +583,7 @@ rfuzz -w files.txt:FILE \
 | `-error-log` | 保存失败请求 payload 日志。 | `-error-log errors.jsonl` |
 | `-summary-json` | 保存任务结束摘要 JSON。 | `-summary-json summary.json` |
 | `-stop-scope` | 停止计数的分组 key。 | `-stop-scope TARGET,USER` |
-| `-stop-on-match` | scope 命中 N 次后停止。 | `-stop-on-match 1` |
+| `-stop-on-match` | scope 命中 N 次后停止调度新请求；不取消已在飞请求。 | `-stop-on-match 1` |
 
 ---
 
@@ -591,7 +593,7 @@ rfuzz -w files.txt:FILE \
 - 模板：`${{KEYWORD}}$` 原生占位符和裸 keyword 兼容，并在启动前校验未知 placeholder 和未使用的 wordlist keyword。
 - 输入模式：`clusterbomb`、`pitchfork`；`sniper` 当前降级为 pitchfork。
 - 调度：自定义 `-order`、`rotate-window` 目标轮转。
-- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速、raw request `Content-Length` 重算，以及有上限的响应 body 读取。
+- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速、raw request `Content-Length` 重算、body CRLF 保留，以及有上限的响应 body 读取。
 - 预检查：目标 payload 连通性检查，支持按轮次重试、只报告模式，失败 payload 默认跳过。
 - 匹配/过滤：状态码、大小、单词数、行数、响应时间、完整 raw response 正则、and/or 组合。
 - 输出：可读命中行、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志和任务结束摘要。

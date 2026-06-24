@@ -96,6 +96,9 @@ fn parse_seconds(raw: &str) -> Result<Duration> {
         .trim()
         .parse::<f64>()
         .map_err(|_| anyhow!("invalid delay '{}'", raw))?;
+    if !seconds.is_finite() {
+        return Err(anyhow!("delay must be finite"));
+    }
     if seconds < 0.0 {
         return Err(anyhow!("delay cannot be negative"));
     }
@@ -115,5 +118,14 @@ mod tests {
         let range = DelayConfig::parse(Some("0.1-0.2")).unwrap();
         assert_eq!(range.min, Duration::from_millis(100));
         assert_eq!(range.max, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn rejects_non_finite_delay_values() {
+        for value in ["NaN", "inf", "1-inf"] {
+            let error = DelayConfig::parse(Some(value)).unwrap_err().to_string();
+
+            assert!(error.contains("delay must be finite"));
+        }
     }
 }

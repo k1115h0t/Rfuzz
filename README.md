@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -141,9 +141,9 @@ rfuzz -request login.txt \
   -fc 401
 ```
 
-`-request-proto` only applies to raw request files. It does not add a scheme to `-u` templates.
+`-request-proto` only applies to raw request files. It does not add a scheme to `-u` templates, and it only accepts `http` or `https`.
 
-Raw request rendering validates `Host` for relative request lines and recalculates `Content-Length` after placeholders are rendered. To inspect the final request without sending it:
+Raw request rendering validates `Host` for relative request lines and recalculates `Content-Length` after placeholders are rendered. Starting in v0.1.9, Burp raw request parsing preserves CRLF line endings inside the body; `-request` is still intended for text raw requests and does not guarantee binary body preservation. To inspect the final request without sending it:
 
 ```bash
 rfuzz -request login.txt \
@@ -244,7 +244,7 @@ rfuzz -u https://TARGET/login \
   -precheck-key TARGET
 ```
 
-Precheck only iterates the payloads for `-precheck-key`; it does not combine other wordlists. Any received HTTP response counts as reachable, including `200`, `301`, `401`, `403`, `404`, and `500`.
+Precheck only iterates the payloads for `-precheck-key`; it does not combine other wordlists. Precheck URLs apply the same `-enc` encoder chain and URL space normalization as normal requests. Any received HTTP response counts as reachable, including `200`, `301`, `401`, `403`, `404`, and `500`.
 
 Disable precheck:
 
@@ -357,6 +357,8 @@ rfuzz -u https://TARGET/login \
 ```
 
 `-stop-scope` can be combined with `-order`, `rotate-window`, and `precheck`. Once the threshold is reached, `rfuzz` fast-forwards through the remaining cases for the same grouping key.
+
+Note: `-stop-on-match` does not cancel requests that are already in flight. With high concurrency or `rotate-window` scheduling, once a grouping key reaches the threshold, `rfuzz` stops scheduling new requests for that key, but already-started requests for the same key may still finish.
 
 ### Safe Preview: dry-run / explain / request-dry-run
 
@@ -494,7 +496,7 @@ rfuzz -w files.txt:FILE \
 | --- | --- | --- |
 | `-u` | URL template. | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request file. | `-request login.txt` |
-| `-request-proto` | Protocol for raw request files. | `-request-proto https` |
+| `-request-proto` | Protocol for raw request files; only `http` / `https` are accepted. | `-request-proto https` |
 | `-request-dry-run` | Safe preview for raw requests: renders and prints the first final request without sending it. | `-request-dry-run` |
 | `-X` | HTTP method. | `-X POST` |
 | `-H` | Header template, repeatable. | `-H "Content-Type: application/json"` |
@@ -526,7 +528,7 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-t` | Concurrent worker count. | `-t 100` |
 | `-rate` | Global requests per second; `0` disables the limit. | `-rate 50` |
 | `-timeout` | Request timeout in seconds. | `-timeout 10` |
-| `-p` | Fixed or random request delay range. | `-p 0.1-0.5` |
+| `-p` | Fixed or random finite request delay range; rejects NaN/inf. | `-p 0.1-0.5` |
 | `-dry-run` | Safe preview: prints the plan and first rendered request without sending requests. | `-dry-run` |
 | `-explain` | Explains the safe-preview plan without sending requests. | `-explain` |
 | `-no-progress` | Disables the progress bar. | `-no-progress` |
@@ -546,7 +548,7 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-dns-negative-cache-ttl` | Failed DNS cache TTL in seconds; `0` disables negative caching. | `-dns-negative-cache-ttl 30` |
 | `-dns-max-concurrent` | Maximum concurrent real DNS lookups. | `-dns-max-concurrent 64` |
 | `-sni` | Compatibility option; arbitrary SNI override is not currently supported. | `-sni example.com` |
-| `-cc` / `-ck` | Client certificate and private key. | `-cc client.crt -ck client.key` |
+| `-cc` / `-ck` | Client certificate and private key; must be provided together. | `-cc client.crt -ck client.key` |
 | `-ignore-body` | Does not read response bodies; status and headers are still available. | `-ignore-body` |
 | `-max-body` | Maximum response body bytes read per response; default: `2097152`. | `-max-body 1048576` |
 | `-body-preview` | Maximum body bytes shown in raw response output; default: `4096`. | `-body-preview 2048` |
@@ -581,7 +583,7 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 | `-error-log` | Saves failed request payload logs. | `-error-log errors.jsonl` |
 | `-summary-json` | Saves the end-of-run summary as JSON. | `-summary-json summary.json` |
 | `-stop-scope` | Grouping key for stop counters. | `-stop-scope TARGET,USER` |
-| `-stop-on-match` | Stops a scope after N matches. | `-stop-on-match 1` |
+| `-stop-on-match` | Stops scheduling new requests for a scope after N matches; does not cancel in-flight requests. | `-stop-on-match 1` |
 
 ---
 
@@ -591,7 +593,7 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 - Templates: native `${{KEYWORD}}$` placeholders and bare keyword compatibility, with startup validation for unknown placeholders and unused wordlist keywords.
 - Input modes: `clusterbomb`, `pitchfork`; `sniper` currently falls back to pitchfork.
 - Scheduling: custom `-order` and `rotate-window` target rotation.
-- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, global rate limiting, raw request `Content-Length` recalculation, and bounded response body reads.
+- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, global rate limiting, raw request `Content-Length` recalculation, body CRLF preservation, and bounded response body reads.
 - Precheck: target payload reachability checks with round-based retries and report-only mode; failed payloads are skipped by default.
 - Matching/filtering: status, size, words, lines, response time, full raw response regex, and/or modes.
 - Output: readable match lines, silent URL, JSONL, CSV, raw request/response capture, JSONL error logs, and end-of-run summaries.

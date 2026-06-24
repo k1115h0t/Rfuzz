@@ -227,6 +227,8 @@ impl TryFrom<Cli> for Config {
         }
         let encoders = EncoderSet::parse(&cli.encoders)?;
         encoders.validate_keywords(&keywords)?;
+        let request_proto = parse_request_proto(&cli.request_proto)?;
+        validate_client_identity_pair(cli.client_cert.as_deref(), cli.client_key.as_deref())?;
 
         let url = cli
             .url
@@ -237,7 +239,7 @@ impl TryFrom<Cli> for Config {
             .request
             .as_ref()
             .map(|path| {
-                RawRequestTemplate::from_burp_file(path, &cli.request_proto, &keywords)
+                RawRequestTemplate::from_burp_file(path, &request_proto, &keywords)
                     .context("invalid raw request file")
             })
             .transpose()?;
@@ -531,6 +533,25 @@ fn parse_precheck_switch(raw: &str) -> Result<bool> {
     parse_on_off_switch("-precheck", raw)
 }
 
+fn parse_request_proto(raw: &str) -> Result<String> {
+    let proto = raw.trim().to_ascii_lowercase();
+    match proto.as_str() {
+        "http" | "https" => Ok(proto),
+        other => Err(anyhow!(
+            "-request-proto only accepts http or https, got: {}",
+            other
+        )),
+    }
+}
+
+fn validate_client_identity_pair(cert: Option<&str>, key: Option<&str>) -> Result<()> {
+    match (cert, key) {
+        (Some(_), Some(_)) | (None, None) => Ok(()),
+        (Some(_), None) => Err(anyhow!("-cc and -ck must be provided together")),
+        (None, Some(_)) => Err(anyhow!("-cc and -ck must be provided together")),
+    }
+}
+
 fn parse_on_off_switch(option: &str, raw: &str) -> Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "1" => Ok(true),
@@ -747,6 +768,57 @@ mod tests {
         let error = Config::try_from(cli).unwrap_err().to_string();
 
         assert!(error.contains("-keepalive only accepts on/off"));
+    }
+
+    #[test]
+    fn rejects_request_proto_other_than_http_or_https() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://FUZZ/login",
+            "-w",
+            "urls.txt:FUZZ",
+            "--request-proto",
+            "ftp",
+        ]);
+
+        let error = Config::try_from(cli).unwrap_err().to_string();
+
+        assert!(error.contains("-request-proto only accepts http or https"));
+    }
+
+    #[test]
+    fn rejects_client_cert_without_key() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://FUZZ/login",
+            "-w",
+            "urls.txt:FUZZ",
+            "--cc",
+            "client.crt",
+        ]);
+
+        let error = Config::try_from(cli).unwrap_err().to_string();
+
+        assert!(error.contains("-cc and -ck must be provided together"));
+    }
+
+    #[test]
+    fn rejects_client_key_without_cert() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://FUZZ/login",
+            "-w",
+            "urls.txt:FUZZ",
+            "--ck",
+            "client.key",
+        ]);
+
+        let error = Config::try_from(cli).unwrap_err().to_string();
+
+        assert!(error.contains("-cc and -ck must be provided together"));
     }
 
     #[test]

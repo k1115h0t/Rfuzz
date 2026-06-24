@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::engine::rate_limiter::RateLimiter;
+use crate::http::request::normalize_url;
 use crate::input::modes::InputCase;
 use crate::input::wordlist::WordlistData;
 use crate::template::render::InputMap;
@@ -155,11 +156,13 @@ fn spawn_precheck_case(
     let Some(template) = config.request.url.clone() else {
         return;
     };
+    let encoders = config.input.encoders.clone();
+    let raw_uri = config.request.raw_uri;
     let key = key.to_string();
     join_set.spawn(async move {
         limiter.wait().await;
-        let input = precheck_input_values(&wordlists, &key, &value);
-        let rendered = template.render(&input)?;
+        let rendered =
+            render_precheck_url(&encoders, raw_uri, &wordlists, &key, &value, &template)?;
         let candidates = candidate_urls(&rendered);
         let mut failures = Vec::new();
         for url in &candidates {
@@ -173,6 +176,20 @@ fn spawn_precheck_case(
         }
         Ok(Some((value, failures)))
     });
+}
+
+fn render_precheck_url(
+    encoders: &crate::input::encoder::EncoderSet,
+    raw_uri: bool,
+    wordlists: &[WordlistData],
+    key: &str,
+    value: &str,
+    template: &crate::template::Template,
+) -> Result<String> {
+    let input = precheck_input_values(wordlists, key, value);
+    let input = encoders.apply_to_map(&input);
+    let rendered = template.render(&input)?;
+    Ok(normalize_url(&rendered, raw_uri))
 }
 
 fn resolve_precheck_key(config: &Config) -> Option<String> {
@@ -317,6 +334,70 @@ mod tests {
         assert_eq!(values["URLFUZZ"], "example.com");
         assert_eq!(values["UFUZZ"], "");
         assert_eq!(values["PFUZZ"], "");
+    }
+
+    #[test]
+    fn precheck_rendering_applies_encoders() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://example.com/${{TARGET}}$",
+            "-w",
+            "targets.txt:TARGET",
+            "--enc",
+            "TARGET:urlencode",
+            "--precheck-key",
+            "TARGET",
+        ]);
+        let config = Config::try_from(cli).unwrap();
+        let wordlists = [WordlistData {
+            keyword: "TARGET".to_string(),
+            values: vec!["a b".to_string()],
+        }];
+        let template = config.request.url.as_ref().unwrap();
+
+        let rendered = render_precheck_url(
+            &config.input.encoders,
+            config.request.raw_uri,
+            &wordlists,
+            "TARGET",
+            "a b",
+            template,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "https://example.com/a+b");
+    }
+
+    #[test]
+    fn precheck_rendering_normalizes_url_like_main_request() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://example.com/${{TARGET}}$",
+            "-w",
+            "targets.txt:TARGET",
+            "--precheck-key",
+            "TARGET",
+        ]);
+        let config = Config::try_from(cli).unwrap();
+        let wordlists = [WordlistData {
+            keyword: "TARGET".to_string(),
+            values: vec!["a b".to_string()],
+        }];
+        let template = config.request.url.as_ref().unwrap();
+
+        let rendered = render_precheck_url(
+            &config.input.encoders,
+            config.request.raw_uri,
+            &wordlists,
+            "TARGET",
+            "a b",
+            template,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "https://example.com/a%20b");
     }
 
     #[test]
