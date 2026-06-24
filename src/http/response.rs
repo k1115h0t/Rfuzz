@@ -88,18 +88,10 @@ impl ResponseSummary {
         self.raw.as_deref().unwrap_or_default()
     }
 
-    pub fn signature_and_raw_response(&mut self) -> (&ResponseSignature, &str) {
-        if self.raw.is_none() {
-            self.raw = Some(build_raw_response(
-                self.version,
-                self.signature.status,
-                &self.headers,
-                &self.body_text,
-                self.body_truncated,
-                self.body_preview_bytes,
-            ));
-        }
-        (&self.signature, self.raw.as_deref().unwrap_or_default())
+    pub fn header_text(&self) -> String {
+        let mut raw = build_response_head(self.version, self.signature.status, &self.headers);
+        raw.push_str("\r\n");
+        raw
     }
 
     pub fn ensure_title(&mut self) {
@@ -117,13 +109,7 @@ fn build_raw_response(
     body_truncated: bool,
     body_preview_bytes: usize,
 ) -> String {
-    let mut raw = format!("{:?} {}\r\n", version, status);
-    for (name, value) in headers {
-        raw.push_str(&canonical_header_name(name.as_str()));
-        raw.push_str(": ");
-        raw.push_str(value.to_str().unwrap_or("<binary>"));
-        raw.push_str("\r\n");
-    }
+    let mut raw = build_response_head(version, status, headers);
     raw.push_str("\r\n");
     let (preview, preview_truncated) = body_preview(body, body_preview_bytes);
     raw.push_str(preview);
@@ -135,6 +121,21 @@ fn build_raw_response(
     }
     if body_truncated {
         raw.push_str("\r\n[rfuzz: response body read stopped at max-body limit]");
+    }
+    raw
+}
+
+fn build_response_head(
+    version: reqwest::Version,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) -> String {
+    let mut raw = format!("{:?} {}\r\n", version, status);
+    for (name, value) in headers {
+        raw.push_str(&canonical_header_name(name.as_str()));
+        raw.push_str(": ");
+        raw.push_str(value.to_str().unwrap_or("<binary>"));
+        raw.push_str("\r\n");
     }
     raw
 }
@@ -232,5 +233,27 @@ mod tests {
         assert!(raw.contains("abc"));
         assert!(raw.contains("preview truncated"));
         assert!(raw.contains("max-body"));
+    }
+
+    #[test]
+    fn header_text_contains_status_and_headers_without_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(SET_COOKIE, HeaderValue::from_static("session_id=abc"));
+
+        let response = summarize(
+            200,
+            reqwest::Version::HTTP_11,
+            &headers,
+            Bytes::from_static(b"body"),
+            false,
+            4096,
+            10,
+        );
+
+        let head = response.header_text();
+
+        assert!(head.starts_with("HTTP/1.1 200\r\n"));
+        assert!(head.contains("Set-Cookie: session_id=abc\r\n"));
+        assert!(!head.contains("body"));
     }
 }

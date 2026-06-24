@@ -11,12 +11,12 @@ use crate::http::request::RenderedRequest;
 use crate::http::response::ResponseSummary;
 use crate::input::encoder::EncoderSet;
 use crate::input::modes::InputCase;
+use crate::matcher::legacy::ResponseNeed;
 
 #[derive(Debug)]
 pub struct WorkerResult {
     pub input: InputCase,
     pub url: String,
-    pub request_raw: String,
     pub rendered_request: RenderedRequest,
     pub response: ResponseSummary,
 }
@@ -35,6 +35,7 @@ pub async fn execute_case(
     limiter: RateLimiter,
     delay: DelayConfig,
     encoders: EncoderSet,
+    response_need: ResponseNeed,
     input: InputCase,
 ) -> std::result::Result<WorkerResult, WorkerError> {
     delay.wait().await;
@@ -50,20 +51,23 @@ pub async fn execute_case(
             }
         })?;
     let url = rendered.url.clone();
-    let request_raw = rendered.raw.clone();
     let started = Instant::now();
-    let response = client::execute(&client, &rendered, request_config.response_body)
-        .await
-        .map_err(|error| WorkerError {
-            input: input.clone(),
-            url: Some(url.clone()),
-            error,
-            elapsed_ms: started.elapsed().as_millis(),
-        })?;
+    let response = client::execute(
+        &client,
+        &rendered,
+        request_config.response_body,
+        response_need,
+    )
+    .await
+    .map_err(|error| WorkerError {
+        input: input.clone(),
+        url: Some(url.clone()),
+        error,
+        elapsed_ms: started.elapsed().as_millis(),
+    })?;
     Ok(WorkerResult {
         input,
         url,
-        request_raw,
         rendered_request: rendered,
         response,
     })

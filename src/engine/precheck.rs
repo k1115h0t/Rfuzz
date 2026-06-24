@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use tokio::task::JoinSet;
 
 use crate::config::Config;
@@ -166,16 +166,30 @@ fn spawn_precheck_case(
         let candidates = candidate_urls(&rendered);
         let mut failures = Vec::new();
         for url in &candidates {
-            match client.get(url).send().await {
+            match probe_precheck_url(&client, url).await {
                 Ok(_) => return Ok(None),
                 Err(error) => {
-                    let error = anyhow::Error::new(error);
                     failures.push(format!("{}: {}", url, brief_error(&error)));
                 }
             }
         }
         Ok(Some((value, failures)))
     });
+}
+
+async fn probe_precheck_url(client: &Client, url: &str) -> Result<()> {
+    match client.head(url).send().await {
+        Ok(response)
+            if response.status() != StatusCode::METHOD_NOT_ALLOWED
+                && response.status() != StatusCode::NOT_IMPLEMENTED =>
+        {
+            Ok(())
+        }
+        Ok(_) | Err(_) => {
+            client.get(url).send().await?;
+            Ok(())
+        }
+    }
 }
 
 fn render_precheck_url(
@@ -254,10 +268,23 @@ fn brief_error_text(text: &str) -> String {
 
     let mut reason = reason.to_string();
     if reason.len() > 120 {
-        reason.truncate(117);
+        truncate_to_char_boundary(&mut reason, 117);
         reason.push_str("...");
     }
     reason
+}
+
+fn truncate_to_char_boundary(text: &mut String, max_len: usize) {
+    if text.len() <= max_len {
+        return;
+    }
+    let end = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= max_len)
+        .last()
+        .unwrap_or(0);
+    text.truncate(end);
 }
 
 fn is_fd_exhaustion_text(lower: &str) -> bool {
@@ -443,7 +470,7 @@ mod tests {
         let server_paths = seen_paths.clone();
 
         let server = tokio::spawn(async move {
-            for _ in 0..6 {
+            for _ in 0..12 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut buffer = [0u8; 1024];
                 let count = stream.read(&mut buffer).await.unwrap();
@@ -486,7 +513,52 @@ mod tests {
         assert!(skipper.is_none());
         assert_eq!(
             *seen_paths.lock().await,
-            vec!["/one", "/two", "/three", "/one", "/two", "/three"]
+            vec![
+                "/one", "/one", "/two", "/two", "/three", "/three", "/one", "/one", "/two", "/two",
+                "/three", "/three"
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn precheck_probe_falls_back_to_get_when_head_is_not_allowed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let server_methods = methods.clone();
+
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 1024];
+                let count = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let method = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().next())
+                    .unwrap_or("")
+                    .to_string();
+                let response = if method == "HEAD" {
+                    "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+                };
+                server_methods.lock().await.push(method);
+                use tokio::io::AsyncWriteExt;
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        probe_precheck_url(&client, &format!("http://{}/target", addr))
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(*methods.lock().await, vec!["HEAD", "GET"]);
     }
 }

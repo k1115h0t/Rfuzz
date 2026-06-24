@@ -139,6 +139,7 @@ pub struct PrecheckConfig {
     pub key: Option<String>,
     pub report_only: bool,
     pub attempts: usize,
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +223,7 @@ impl TryFrom<Cli> for Config {
         let matcher = MatcherConfig::from_cli(&cli)?;
         if cli.ignore_body && matcher.uses_response_body() {
             tracing::warn!(
-                "-ignore-body is enabled while regex matchers/filters need the response body; regex rules will only see headers"
+                "-ignore-body is enabled while matchers/filters need the response body; body-dependent rules will see empty body stats/text"
             );
         }
         let encoders = EncoderSet::parse(&cli.encoders)?;
@@ -275,6 +276,7 @@ impl TryFrom<Cli> for Config {
             key: cli.precheck_key.clone(),
             report_only: cli.precheck_report_only,
             attempts: cli.precheck_attempts.max(1),
+            timeout: Duration::from_secs(cli.precheck_timeout_secs.max(1)),
         };
         if let Some(key) = &precheck.key {
             validate_keywords_exist("-precheck-key", std::slice::from_ref(key), &keywords)?;
@@ -657,6 +659,8 @@ mod tests {
             "--precheck-report-only",
             "--precheck-attempts",
             "5",
+            "--precheck-timeout",
+            "2",
         ]);
 
         let config = Config::try_from(cli).unwrap();
@@ -665,6 +669,7 @@ mod tests {
         assert_eq!(config.precheck.key.as_deref(), Some("URLFUZZ"));
         assert!(config.precheck.report_only);
         assert_eq!(config.precheck.attempts, 5);
+        assert_eq!(config.precheck.timeout, Duration::from_secs(2));
     }
 
     #[test]

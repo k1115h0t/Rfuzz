@@ -18,6 +18,8 @@ pub struct MatcherConfig {
     pub filter_time: Option<TimeSpec>,
     pub match_regex: Vec<Regex>,
     pub filter_regex: Vec<Regex>,
+    pub match_header_regex: Vec<Regex>,
+    pub filter_header_regex: Vec<Regex>,
     pub matcher_mode: SetMode,
     pub filter_mode: SetMode,
 }
@@ -44,6 +46,20 @@ pub enum SetMode {
     #[default]
     Or,
     And,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseNeed {
+    StatusOnly,
+    HeadersOnly,
+    BodyStats,
+    BodyText,
+}
+
+impl ResponseNeed {
+    pub fn needs_body(self) -> bool {
+        matches!(self, Self::BodyStats | Self::BodyText)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,19 +126,26 @@ impl MatcherConfig {
                 .transpose()?,
             match_regex: compile_regexes(&cli.match_regex)?,
             filter_regex: compile_regexes(&cli.filter_regex)?,
+            match_header_regex: compile_regexes(&cli.match_header_regex)?,
+            filter_header_regex: compile_regexes(&cli.filter_header_regex)?,
             matcher_mode: cli.matcher_mode.into(),
             filter_mode: cli.filter_mode.into(),
         })
     }
 
-    pub fn should_output(&self, signature: &ResponseSignature, body: &str) -> bool {
-        if self.is_filtered(signature, body) {
+    pub fn should_output(
+        &self,
+        signature: &ResponseSignature,
+        response_text: &str,
+        headers_text: &str,
+    ) -> bool {
+        if self.is_filtered(signature, response_text, headers_text) {
             return false;
         }
         if !self.has_matchers() {
             return true;
         }
-        self.is_matched(signature, body)
+        self.is_matched(signature, response_text, headers_text)
     }
 
     fn has_matchers(&self) -> bool {
@@ -132,13 +155,41 @@ impl MatcherConfig {
             || self.match_lines.is_some()
             || self.match_time.is_some()
             || !self.match_regex.is_empty()
+            || !self.match_header_regex.is_empty()
     }
 
     pub fn uses_response_body(&self) -> bool {
-        !self.match_regex.is_empty() || !self.filter_regex.is_empty()
+        self.response_need().needs_body()
     }
 
-    fn is_filtered(&self, signature: &ResponseSignature, body: &str) -> bool {
+    pub fn uses_response_headers(&self) -> bool {
+        !self.match_header_regex.is_empty() || !self.filter_header_regex.is_empty()
+    }
+
+    pub fn response_need(&self) -> ResponseNeed {
+        if !self.match_regex.is_empty() || !self.filter_regex.is_empty() {
+            ResponseNeed::BodyText
+        } else if self.match_size.is_some()
+            || self.filter_size.is_some()
+            || self.match_words.is_some()
+            || self.filter_words.is_some()
+            || self.match_lines.is_some()
+            || self.filter_lines.is_some()
+        {
+            ResponseNeed::BodyStats
+        } else if self.uses_response_headers() {
+            ResponseNeed::HeadersOnly
+        } else {
+            ResponseNeed::StatusOnly
+        }
+    }
+
+    fn is_filtered(
+        &self,
+        signature: &ResponseSignature,
+        response_text: &str,
+        headers_text: &str,
+    ) -> bool {
         let checks = [
             self.filter_status
                 .as_ref()
@@ -160,12 +211,26 @@ impl MatcherConfig {
             checks
                 .into_iter()
                 .flatten()
-                .chain(self.filter_regex.iter().map(|regex| regex.is_match(body))),
+                .chain(
+                    self.filter_header_regex
+                        .iter()
+                        .map(|regex| regex.is_match(headers_text)),
+                )
+                .chain(
+                    self.filter_regex
+                        .iter()
+                        .map(|regex| regex.is_match(response_text)),
+                ),
             self.filter_mode,
         )
     }
 
-    fn is_matched(&self, signature: &ResponseSignature, body: &str) -> bool {
+    fn is_matched(
+        &self,
+        signature: &ResponseSignature,
+        response_text: &str,
+        headers_text: &str,
+    ) -> bool {
         let checks = [
             self.match_status
                 .as_ref()
@@ -187,7 +252,16 @@ impl MatcherConfig {
             checks
                 .into_iter()
                 .flatten()
-                .chain(self.match_regex.iter().map(|regex| regex.is_match(body))),
+                .chain(
+                    self.match_header_regex
+                        .iter()
+                        .map(|regex| regex.is_match(headers_text)),
+                )
+                .chain(
+                    self.match_regex
+                        .iter()
+                        .map(|regex| regex.is_match(response_text)),
+                ),
             self.matcher_mode,
         )
     }
@@ -359,10 +433,10 @@ mod tests {
             filter_lines: Some(NumberSpec::parse("1-2").unwrap()),
             ..MatcherConfig::default()
         };
-        assert!(!matcher.should_output(&sig(200, 150, 1, 3), ""));
-        assert!(!matcher.should_output(&sig(200, 99, 10, 3), ""));
-        assert!(!matcher.should_output(&sig(200, 99, 9, 2), ""));
-        assert!(matcher.should_output(&sig(200, 99, 9, 3), ""));
+        assert!(!matcher.should_output(&sig(200, 150, 1, 3), "", ""));
+        assert!(!matcher.should_output(&sig(200, 99, 10, 3), "", ""));
+        assert!(!matcher.should_output(&sig(200, 99, 9, 2), "", ""));
+        assert!(matcher.should_output(&sig(200, 99, 9, 3), "", ""));
     }
 
     #[test]
@@ -373,7 +447,32 @@ mod tests {
             matcher_mode: SetMode::And,
             ..MatcherConfig::default()
         };
-        assert!(matcher.should_output(&timed_sig(150), ""));
-        assert!(!matcher.should_output(&timed_sig(50), ""));
+        assert!(matcher.should_output(&timed_sig(150), "", ""));
+        assert!(!matcher.should_output(&timed_sig(50), "", ""));
+    }
+
+    #[test]
+    fn header_regex_uses_headers_only_response_need() {
+        let matcher = MatcherConfig {
+            match_header_regex: vec![Regex::new("(?i)set-cookie: session=").unwrap()],
+            ..MatcherConfig::default()
+        };
+
+        assert_eq!(matcher.response_need(), ResponseNeed::HeadersOnly);
+        assert!(matcher.should_output(
+            &sig(200, 0, 0, 0),
+            "",
+            "HTTP/1.1 200\r\nSet-Cookie: session=abc\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn body_regex_still_requires_body_text() {
+        let matcher = MatcherConfig {
+            match_regex: vec![Regex::new("welcome").unwrap()],
+            ..MatcherConfig::default()
+        };
+
+        assert_eq!(matcher.response_need(), ResponseNeed::BodyText);
     }
 }

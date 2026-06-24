@@ -275,6 +275,16 @@ pub struct Cli {
     #[arg(long = "fr", help = "过滤正则 / Filter regex")]
     pub filter_regex: Vec<String>,
     #[arg(
+        long = "mhr",
+        help = "匹配响应头正则，不读取 body / Match response header regex without reading body"
+    )]
+    pub match_header_regex: Vec<String>,
+    #[arg(
+        long = "fhr",
+        help = "过滤响应头正则，不读取 body / Filter response header regex without reading body"
+    )]
+    pub filter_header_regex: Vec<String>,
+    #[arg(
         long = "mt",
         help = "匹配响应时间，例如 >100 / Match response time, e.g. >100"
     )]
@@ -379,6 +389,13 @@ pub struct Cli {
         help = "预检查轮询次数，按轮次遍历所有目标 / Precheck round count across all targets"
     )]
     pub precheck_attempts: usize,
+
+    #[arg(
+        long = "precheck-timeout",
+        default_value_t = 3,
+        help = "预检查请求超时秒数 / Precheck request timeout in seconds"
+    )]
+    pub precheck_timeout_secs: u64,
 
     #[arg(
         long = "no-progress",
@@ -541,6 +558,7 @@ where
         "-precheck-key",
         "-precheck-report-only",
         "-precheck-attempts",
+        "-precheck-timeout",
         "-no-progress",
         "-stop-on-match",
         "-stop-scope",
@@ -586,6 +604,8 @@ mod tests {
             "-precheck-report-only".to_string(),
             "-precheck-attempts".to_string(),
             "5".to_string(),
+            "-precheck-timeout".to_string(),
+            "2".to_string(),
         ]);
 
         assert_eq!(
@@ -599,6 +619,8 @@ mod tests {
                 "--precheck-report-only",
                 "--precheck-attempts",
                 "5",
+                "--precheck-timeout",
+                "2",
             ]
         );
     }

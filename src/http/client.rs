@@ -10,6 +10,7 @@ use crate::config::{RequestConfig, ResponseBodyConfig};
 use crate::http::dns_cache::CachedResolver;
 use crate::http::request::RenderedRequest;
 use crate::http::response::{summarize, ResponseSummary};
+use crate::matcher::legacy::ResponseNeed;
 
 pub fn build_client(config: &RequestConfig) -> Result<Client> {
     let mut builder =
@@ -59,6 +60,7 @@ pub async fn execute(
     client: &Client,
     request: &RenderedRequest,
     body_config: ResponseBodyConfig,
+    response_need: ResponseNeed,
 ) -> Result<ResponseSummary> {
     let started = Instant::now();
     let mut builder = client.request(request.method.clone(), &request.url);
@@ -73,6 +75,11 @@ pub async fn execute(
     let status = response.status().as_u16();
     let version = response.version();
     let headers = response.headers().clone();
+    let body_config = if response_need.needs_body() {
+        body_config
+    } else {
+        ResponseBodyConfig::ignore()
+    };
     let (body, body_truncated) = read_body_with_limit(response, body_config).await?;
     Ok(summarize(
         status,

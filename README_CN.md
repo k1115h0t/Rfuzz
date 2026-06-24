@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -39,7 +39,9 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 | ffuf 风格 CLI | 支持 `-u`、`-w`、`-H`、`-X`、`-d`、`-mc`、`-fc`、`-mr` 等常见参数风格。 |
 | 多字典组合 | 支持 `clusterbomb`、`pitchfork`，并预留 `sniper`。 |
 | 惰性生成 | 大规模笛卡尔积不会一次性加载全部请求组合。 |
-| 目标预检查 | `-precheck-key` 先探测目标是否可达，失败 payload 默认跳过。 |
+| lazy raw request | raw HTTP 请求字符串只在 dry-run、request-dry-run 和命中 raw 保存时构造，不再每个请求都拼。 |
+| header-only 匹配 | `-mhr` / `-fhr` 只匹配/过滤响应头，不读取响应 body。 |
+| 目标预检查 | `-precheck-key` 用短超时和 HEAD 优先 fallback 探测目标是否可达，失败 payload 默认跳过。 |
 | 目标轮转 | `-schedule rotate-window` 适合多 URL、多账号、多密码场景，避免长时间打同一个目标。 |
 | 按作用域停止 | 命中后可按 `TARGET`、`USER` 或 `TARGET,USER` 这样的分组提前跳过剩余组合。详见“scope：停止计数的分组键”。 |
 | 安全预演 | `-dry-run` / `-explain` / `-request-dry-run` 可在不发送请求的情况下检查计划和最终请求。 |
@@ -115,7 +117,7 @@ rfuzz -u https://example.com/login \
   -w users.txt:USER \
   -w passwords.txt:PASS \
   -mode clusterbomb \
-  -mr 'Set-Cookie: session_id='
+  -mhr 'Set-Cookie: session_id='
 ```
 
 默认组合模式是 `clusterbomb`，即多个字典做笛卡尔积。
@@ -244,7 +246,7 @@ rfuzz -u https://TARGET/login \
   -precheck-key TARGET
 ```
 
-预检查只遍历 `-precheck-key` 对应 payload，不会组合其他字典。预检查 URL 会和主请求一样应用 `-enc` 编码链，并使用同样的 URL 空格归一化逻辑。只要能收到 HTTP 响应，就视为目标可达；`200`、`301`、`401`、`403`、`404`、`500` 等状态码都算可达。
+预检查只遍历 `-precheck-key` 对应 payload，不会组合其他字典。预检查 URL 会和主请求一样应用 `-enc` 编码链，并使用同样的 URL 空格归一化逻辑。预检查使用独立超时，默认 `-precheck-timeout 3`，并优先用 `HEAD` 探测；如果 `HEAD` 不允许或失败，再 fallback 到 `GET`。只要能收到 HTTP 响应，就视为目标可达；`200`、`301`、`401`、`403`、`404`、`500` 等状态码都算可达。
 
 关闭预检查：
 
@@ -267,7 +269,8 @@ rfuzz -u https://TARGET/login \
 rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -precheck-key TARGET \
-  -precheck-attempts 5
+  -precheck-attempts 5 \
+  -precheck-timeout 2
 ```
 
 ### 目标轮转
@@ -287,7 +290,7 @@ rfuzz -u https://TARGET/login \
   -target-key TARGET \
   -target-window 100 \
   -target-burst 3 \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -o result.jsonl \
   -of jsonl \
   -t 100
@@ -329,7 +332,7 @@ rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -w users.txt:USER \
   -w passwords.txt:PASS \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -stop-scope TARGET \
   -stop-on-match 1
 ```
@@ -351,7 +354,7 @@ rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -w users.txt:USER \
   -w passwords.txt:PASS \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -stop-scope TARGET,USER \
   -stop-on-match 1
 ```
@@ -536,6 +539,7 @@ rfuzz -w files.txt:FILE \
 | `-precheck-key` | 目标预检查 keyword。 | `-precheck-key TARGET` |
 | `-precheck-report-only` | 只报告，不跳过失败 payload。 | `-precheck-report-only` |
 | `-precheck-attempts` | 预检查按轮次遍历目标的次数。 | `-precheck-attempts 5` |
+| `-precheck-timeout` | 每个预检查请求的超时秒数；默认值：`3`。 | `-precheck-timeout 2` |
 | `-r` | 跟随重定向。 | `-r` |
 | `-raw` | 禁用 URI 空格编码。 | `-raw` |
 | `-x` | 请求代理。 | `-x http://127.0.0.1:8080` |
@@ -566,7 +570,8 @@ rfuzz -w files.txt:FILE \
 | `-ms` / `-fs` | 匹配/过滤响应大小。 | `-fs 0` |
 | `-mw` / `-fw` | 匹配/过滤单词数。 | `-mw 10-30` |
 | `-ml` / `-fl` | 匹配/过滤行数。 | `-ml 5-20` |
-| `-mr` / `-fr` | 匹配/过滤完整 raw response 正则。 | `-mr 'Set-Cookie: session_id='` |
+| `-mhr` / `-fhr` | 匹配/过滤响应头正则，不读取 body。 | `-mhr 'Set-Cookie: session_id='` |
+| `-mr` / `-fr` | 匹配/过滤完整 raw response 正则，会读取响应 body。 | `-mr 'welcome'` |
 | `-mt` / `-ft` | 匹配/过滤响应时间，单位 ms。 | `-mt '>100'` |
 | `-mmode` / `-fmode` | matcher/filter 组合模式。 | `-mmode and` |
 
@@ -589,11 +594,11 @@ rfuzz -w files.txt:FILE \
 
 ## 当前实现状态
 
-- CLI：请求、输入、执行、matcher/filter、输出、dry-run、body limit、summary、预算控制等主要参数。
+- CLI：请求、输入、执行、matcher/filter、header-only matcher、输出、dry-run、body limit、summary、预算控制等主要参数。
 - 模板：`${{KEYWORD}}$` 原生占位符和裸 keyword 兼容，并在启动前校验未知 placeholder 和未使用的 wordlist keyword。
 - 输入模式：`clusterbomb`、`pitchfork`；`sniper` 当前降级为 pitchfork。
 - 调度：自定义 `-order`、`rotate-window` 目标轮转。
-- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速、raw request `Content-Length` 重算、body CRLF 保留，以及有上限的响应 body 读取。
+- HTTP：tokio + reqwest，支持代理、replay proxy、重定向、超时、keep-alive、DNS 缓存、全局限速、lazy raw request 构造、raw request `Content-Length` 重算、body CRLF 保留、header-only 响应匹配、precheck 独立超时、HEAD 优先预检查，以及有上限的响应 body 读取。
 - 预检查：目标 payload 连通性检查，支持按轮次重试、只报告模式，失败 payload 默认跳过。
 - 匹配/过滤：状态码、大小、单词数、行数、响应时间、完整 raw response 正则、and/or 组合。
 - 输出：可读命中行、silent URL、JSONL、CSV、raw request/response 保存、错误 JSONL 日志和任务结束摘要。

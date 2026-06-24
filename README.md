@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -39,7 +39,9 @@ It is useful for:
 | ffuf-style CLI | Supports common options such as `-u`, `-w`, `-H`, `-X`, `-d`, `-mc`, `-fc`, and `-mr`. |
 | Multi-wordlist modes | Supports `clusterbomb` and `pitchfork`, with `sniper` reserved. |
 | Lazy generation | Large Cartesian products are streamed instead of materialized up front. |
-| Target precheck | `-precheck-key` probes target reachability before the full run; failed payloads are skipped by default. |
+| Lazy raw requests | Raw HTTP request strings are built only for dry-run, request-dry-run, and matched raw captures instead of every request. |
+| Header-only matching | `-mhr` / `-fhr` match or filter response headers without reading response bodies. |
+| Target precheck | `-precheck-key` probes target reachability before the full run with a short timeout and HEAD-first fallback; failed payloads are skipped by default. |
 | Target rotation | `-schedule rotate-window` is designed for many URLs, users, and passwords without hammering one target continuously. |
 | Scoped stopping | After a hit, skip remaining combinations by grouping keys such as `TARGET`, `USER`, or `TARGET,USER`. See “scope: the grouping key for stop counters”. |
 | Safe preview | `-dry-run` / `-explain` / `-request-dry-run` inspect the plan and final request without sending network traffic. |
@@ -115,7 +117,7 @@ rfuzz -u https://example.com/login \
   -w users.txt:USER \
   -w passwords.txt:PASS \
   -mode clusterbomb \
-  -mr 'Set-Cookie: session_id='
+  -mhr 'Set-Cookie: session_id='
 ```
 
 The default combination mode is `clusterbomb`, meaning all wordlists are combined as a Cartesian product.
@@ -244,7 +246,7 @@ rfuzz -u https://TARGET/login \
   -precheck-key TARGET
 ```
 
-Precheck only iterates the payloads for `-precheck-key`; it does not combine other wordlists. Precheck URLs apply the same `-enc` encoder chain and URL space normalization as normal requests. Any received HTTP response counts as reachable, including `200`, `301`, `401`, `403`, `404`, and `500`.
+Precheck only iterates the payloads for `-precheck-key`; it does not combine other wordlists. Precheck URLs apply the same `-enc` encoder chain and URL space normalization as normal requests. Precheck uses its own timeout, `-precheck-timeout 3` by default, and probes with `HEAD` first before falling back to `GET` when `HEAD` is not allowed or fails. Any received HTTP response counts as reachable, including `200`, `301`, `401`, `403`, `404`, and `500`.
 
 Disable precheck:
 
@@ -267,7 +269,8 @@ Precheck scans all targets by rounds. With the default 3 attempts, three targets
 rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -precheck-key TARGET \
-  -precheck-attempts 5
+  -precheck-attempts 5 \
+  -precheck-timeout 2
 ```
 
 ### Target Rotation
@@ -287,7 +290,7 @@ rfuzz -u https://TARGET/login \
   -target-key TARGET \
   -target-window 100 \
   -target-burst 3 \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -o result.jsonl \
   -of jsonl \
   -t 100
@@ -329,7 +332,7 @@ rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -w users.txt:USER \
   -w passwords.txt:PASS \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -stop-scope TARGET \
   -stop-on-match 1
 ```
@@ -351,7 +354,7 @@ rfuzz -u https://TARGET/login \
   -w targets.txt:TARGET \
   -w users.txt:USER \
   -w passwords.txt:PASS \
-  -mr 'Set-Cookie: session_id=' \
+  -mhr 'Set-Cookie: session_id=' \
   -stop-scope TARGET,USER \
   -stop-on-match 1
 ```
@@ -536,6 +539,7 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-precheck-key` | Target precheck keyword. | `-precheck-key TARGET` |
 | `-precheck-report-only` | Reports failures without skipping failed payloads. | `-precheck-report-only` |
 | `-precheck-attempts` | Number of target precheck rounds. | `-precheck-attempts 5` |
+| `-precheck-timeout` | Per-request precheck timeout in seconds; default: `3`. | `-precheck-timeout 2` |
 | `-r` | Follows redirects. | `-r` |
 | `-raw` | Disables URI space encoding. | `-raw` |
 | `-x` | Request proxy. | `-x http://127.0.0.1:8080` |
@@ -566,7 +570,8 @@ Filters take precedence over matchers. If a response matches a filter condition,
 | `-ms` / `-fs` | Match/filter response size. | `-fs 0` |
 | `-mw` / `-fw` | Match/filter word count. | `-mw 10-30` |
 | `-ml` / `-fl` | Match/filter line count. | `-ml 5-20` |
-| `-mr` / `-fr` | Match/filter full raw response regex. | `-mr 'Set-Cookie: session_id='` |
+| `-mhr` / `-fhr` | Match/filter response header regex without reading the body. | `-mhr 'Set-Cookie: session_id='` |
+| `-mr` / `-fr` | Match/filter full raw response regex; reads the response body. | `-mr 'welcome'` |
 | `-mt` / `-ft` | Match/filter response time in ms. | `-mt '>100'` |
 | `-mmode` / `-fmode` | Matcher/filter set mode. | `-mmode and` |
 
@@ -589,11 +594,11 @@ Status codes support `all`, single values, comma-separated lists, and ranges. Ti
 
 ## Implementation Status
 
-- CLI: request, input, execution, matcher/filter, output, dry-run, body-limit, summary, and request budget options.
+- CLI: request, input, execution, matcher/filter, header-only matcher, output, dry-run, body-limit, summary, and request budget options.
 - Templates: native `${{KEYWORD}}$` placeholders and bare keyword compatibility, with startup validation for unknown placeholders and unused wordlist keywords.
 - Input modes: `clusterbomb`, `pitchfork`; `sniper` currently falls back to pitchfork.
 - Scheduling: custom `-order` and `rotate-window` target rotation.
-- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, global rate limiting, raw request `Content-Length` recalculation, body CRLF preservation, and bounded response body reads.
+- HTTP: tokio + reqwest with proxy, replay proxy, redirects, timeout, keep-alive, DNS cache, global rate limiting, lazy raw request construction, raw request `Content-Length` recalculation, body CRLF preservation, header-only response matching, precheck timeout, HEAD-first precheck, and bounded response body reads.
 - Precheck: target payload reachability checks with round-based retries and report-only mode; failed payloads are skipped by default.
 - Matching/filtering: status, size, words, lines, response time, full raw response regex, and/or modes.
 - Output: readable match lines, silent URL, JSONL, CSV, raw request/response capture, JSONL error logs, and end-of-run summaries.

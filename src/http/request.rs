@@ -10,7 +10,6 @@ pub struct RenderedRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    pub raw: String,
 }
 
 impl RenderedRequest {
@@ -28,7 +27,6 @@ impl RenderedRequest {
                 url: normalize_url(&url, config.raw_uri),
                 headers: Vec::new(),
                 body: None,
-                raw: String::new(),
             }
         };
 
@@ -54,12 +52,13 @@ impl RenderedRequest {
             .or(rendered.body);
         let headers = normalize_content_length_headers(headers, body.as_deref());
 
-        let raw = build_raw_request(&rendered.method, &rendered.url, &headers, body.as_deref());
-
         rendered.headers = headers;
         rendered.body = body;
-        rendered.raw = raw;
         Ok(rendered)
+    }
+
+    pub fn raw(&self) -> String {
+        build_raw_request(&self.method, &self.url, &self.headers, self.body.as_deref())
     }
 }
 
@@ -97,7 +96,6 @@ fn render_raw_request(raw: &RawRequestTemplate, input: &InputMap) -> Result<Rend
         url,
         headers,
         body,
-        raw: String::new(),
     })
 }
 
@@ -260,7 +258,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rendered.raw.contains("Content-Length: 15\r\n"));
-        assert!(!rendered.raw.contains("Content-Length: 999"));
+        let raw = rendered.raw();
+        assert!(raw.contains("Content-Length: 15\r\n"));
+        assert!(!raw.contains("Content-Length: 999"));
     }
 }

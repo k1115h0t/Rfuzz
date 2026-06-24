@@ -51,7 +51,14 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     let client = build_client(&config.request)?;
-    let precheck_skipper = precheck::run(&config, &wordlists, client.clone()).await?;
+    let precheck_client = if config.precheck.enabled {
+        let mut precheck_request = config.request.clone();
+        precheck_request.timeout = config.precheck.timeout;
+        build_client(&precheck_request)?
+    } else {
+        client.clone()
+    };
+    let precheck_skipper = precheck::run(&config, &wordlists, precheck_client).await?;
     let precheck_skipped =
         fast_filter_precheck_failures(&config, &mut wordlists, precheck_skipper.as_deref());
     let precheck_skipper = if precheck_skipped > 0 {
@@ -268,7 +275,8 @@ fn print_execution_plan(
         let render_values = config.input.encoders.apply_to_map(&input.values);
         let rendered = RenderedRequest::from_config(&config.request, &render_values)?;
         eprintln!("  first request / 首个最终请求:");
-        eprintln!("{}", rendered.raw.trim_end());
+        let raw = rendered.raw();
+        eprintln!("{}", raw.trim_end());
     }
 
     if config.request.raw_request.is_some() {
@@ -278,7 +286,7 @@ fn print_execution_plan(
     }
     if config.matcher.uses_response_body() && config.request.response_body.ignore {
         eprintln!(
-            "  warning / 警告: regex match/filter is configured but -ignore-body is enabled."
+            "  warning / 警告: matcher/filter needs response body but -ignore-body is enabled."
         );
     }
     Ok(())
@@ -720,12 +728,14 @@ fn spawn_case(
     scope_stop: Option<Arc<Mutex<ScopeStopTracker>>>,
 ) {
     join_set.spawn(async move {
+        let response_need = matcher.response_need();
         match worker::execute_case(
             client,
             request_config,
             limiter,
             delay,
             encoders,
+            response_need,
             input.clone(),
         )
         .await
@@ -982,6 +992,7 @@ fn spawn_scope(
                 limiter.clone(),
                 delay,
                 encoders.clone(),
+                matcher.response_need(),
                 input.clone(),
             )
             .await
@@ -1082,37 +1093,48 @@ async fn handle_match_result(
     replay_client: Option<reqwest::Client>,
     output_directory: Option<String>,
 ) -> Result<bool> {
-    let matched = if matcher.uses_response_body() {
-        let (signature, raw) = result.response.signature_and_raw_response();
-        matcher.should_output(signature, raw)
+    let response_text = if matcher.response_need() == crate::matcher::legacy::ResponseNeed::BodyText
+    {
+        Some(result.response.raw_response().to_string())
     } else {
-        matcher.should_output(&result.response.signature, "")
+        None
     };
+    let headers_text = matcher
+        .uses_response_headers()
+        .then(|| result.response.header_text());
+    let matched = matcher.should_output(
+        &result.response.signature,
+        response_text.as_deref().unwrap_or_default(),
+        headers_text.as_deref().unwrap_or_default(),
+    );
     if !matched {
         return Ok(false);
     }
 
     result.response.ensure_title();
-    let response_raw = result.response.raw_response().to_string();
-    let raw = RawExchange {
-        request: result.request_raw,
-        response: response_raw,
-    };
     let record = OutputRecord::new(
         result.url,
         result.input.display,
         result.input.values,
         &result.response.signature,
     );
-    if let Some(dir) = output_directory {
+    let raw = if let Some(dir) = output_directory {
+        let raw = RawExchange {
+            request: result.rendered_request.raw(),
+            response: result.response.raw_response().to_string(),
+        };
         let _ = save_raw_exchange(&dir, &record, &raw)?;
-    }
-    writer.lock().await.write_record(&record, Some(&raw))?;
+        Some(raw)
+    } else {
+        None
+    };
+    writer.lock().await.write_record(&record, raw.as_ref())?;
     if let Some(replay_client) = replay_client {
         let _ = client::execute(
             &replay_client,
             &result.rendered_request,
             ResponseBodyConfig::ignore(),
+            crate::matcher::legacy::ResponseNeed::StatusOnly,
         )
         .await;
     }
@@ -1174,13 +1196,11 @@ mod tests {
                 display: "admin".to_string(),
             },
             url: "https://example.com/login".to_string(),
-            request_raw: "POST /login HTTP/1.1\r\n\r\n".to_string(),
             rendered_request: RenderedRequest {
                 method: reqwest::Method::POST,
                 url: "https://example.com/login".to_string(),
                 headers: Vec::new(),
                 body: None,
-                raw: "POST /login HTTP/1.1\r\n\r\n".to_string(),
             },
             response: ResponseSummary::from_parts(
                 ResponseSignature {
