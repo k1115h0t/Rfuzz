@@ -18,7 +18,7 @@ A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style 
 
 ## What Is This?
 
-`rfuzz` is a lightweight, scriptable web fuzzing tool. It keeps familiar `ffuf`-style workflows while adding dry-run execution plans, target prechecks, target rotation, scope-level stop controls, DNS caching, response body limits, end-of-run summaries, error logs, and structured output for large multi-target jobs.
+`rfuzz` is a lightweight, scriptable web fuzzing tool. It keeps familiar `ffuf`-style workflows while adding safe previews, target prechecks, target rotation, scoped stopping, DNS caching, response body limits, end-of-run summaries, error logs, and structured output for large multi-target jobs.
 
 It is useful for:
 
@@ -41,8 +41,8 @@ It is useful for:
 | Lazy generation | Large Cartesian products are streamed instead of materialized up front. |
 | Target precheck | `-precheck-key` probes target reachability before the full run; failed payloads are skipped by default. |
 | Target rotation | `-schedule rotate-window` is designed for many URLs, users, and passwords without hammering one target continuously. |
-| Scope-level stop | `-stop-scope` plus `-stop-on-match` can skip remaining requests for a URL, user, or grouped combination after a hit. |
-| Dry-run planning | `-dry-run`, `-explain`, and `-request-dry-run` show the rendered plan/request before any network traffic is sent. |
+| Scoped stopping | After a hit, skip remaining combinations by grouping keys such as `TARGET`, `USER`, or `TARGET,USER`. See “scope: the grouping key for stop counters”. |
+| Safe preview | `-dry-run` / `-explain` / `-request-dry-run` inspect the plan and final request without sending network traffic. |
 | HTTP tuning | Supports proxies, redirects, HTTP/2, keep-alive, DNS cache, timeouts, delays, and global rate limits. |
 | Structured output | Supports readable `[MATCH]` console lines, silent URL output, JSONL, CSV, raw request/response capture, JSONL error logs, and JSON run summaries. |
 
@@ -151,6 +151,42 @@ rfuzz -request login.txt \
   -w passwords.txt:PASS \
   -request-dry-run
 ```
+
+---
+
+## Commonly Confused Concepts
+
+### Safe preview: dry-run / explain / request-dry-run
+
+Think of dry-run as “preview only, do not execute.”
+
+With `-dry-run`, `rfuzz` loads wordlists, parses templates, estimates request counts, applies the combination mode, scheduler, concurrency, rate limit, precheck settings, and output settings, then renders the first final request for inspection. It does not send any HTTP requests.
+
+This is useful before a large job because it answers three practical questions:
+
+1. Are placeholders being replaced correctly?
+2. Is the request count what you expected?
+3. Will the final request hit the intended target?
+
+| Option | Use When | What It Does |
+| --- | --- | --- |
+| `-dry-run` | Normal URL-template jobs | Prints the full execution plan and first rendered request. |
+| `-explain` | You want to confirm job configuration | Similar to `-dry-run`, with emphasis on explaining the plan. |
+| `-request-dry-run` | You use a Burp raw request file | Renders and prints the first final raw request without sending it. |
+
+### request-dry-run: render a raw request, send nothing
+
+`-request-dry-run` is the safe preview mode for raw request files. It reads the Burp-exported request, replaces placeholders, applies the target protocol, recalculates `Content-Length`, and prints the first final raw request. After printing, the job exits without network traffic.
+
+### scope: the grouping key for stop counters
+
+In `rfuzz`, scope means a “grouping key” built from one or more wordlist keywords.
+
+`-stop-scope TARGET` means each `TARGET` is counted independently. Once a target reaches the match threshold, the remaining combinations for that target are skipped.
+
+`-stop-scope TARGET,USER` means each `TARGET + USER` pair is counted independently. If one user hits on one target, only that user’s remaining passwords on that target are skipped; other users on the same target are not affected.
+
+Keywords in `-stop-scope` must come from wordlists declared with `-w file:KEYWORD`. At runtime, `rfuzz` takes those keyword values from the current case and builds a key. Once the key reaches `-stop-on-match`, later cases with the same key are skipped.
 
 ---
 
@@ -268,7 +304,25 @@ Option meanings:
 
 ### Stop After Match
 
-Skip remaining combinations for a target after one hit:
+Assume the wordlists are:
+
+```text
+TARGET = [a.com, b.com]
+USER   = [alice, bob]
+PASS   = [123456, admin, qwerty]
+```
+
+#### Example A: `-stop-scope TARGET -stop-on-match 1`
+
+Meaning: each target stops independently after 1 match, skipping all remaining `USER/PASS` combinations for that target.
+
+If `a.com + alice + admin` matches, then:
+
+- `a.com + alice + qwerty` is skipped.
+- `a.com + bob + 123456/admin/qwerty` is also skipped.
+- `b.com` is unaffected and continues.
+
+Command:
 
 ```bash
 rfuzz -u https://TARGET/login \
@@ -280,7 +334,17 @@ rfuzz -u https://TARGET/login \
   -stop-on-match 1
 ```
 
-Skip remaining passwords for the current target and user:
+#### Example B: `-stop-scope TARGET,USER -stop-on-match 1`
+
+Meaning: each “target + user” pair stops independently after 1 match, skipping the remaining passwords for that user on that target.
+
+If `a.com + alice + admin` matches, then:
+
+- `a.com + alice + qwerty` is skipped.
+- `a.com + bob + ...` continues.
+- `b.com + alice + ...` also continues.
+
+Command:
 
 ```bash
 rfuzz -u https://TARGET/login \
@@ -292,11 +356,11 @@ rfuzz -u https://TARGET/login \
   -stop-on-match 1
 ```
 
-`-stop-scope` can be combined with `-order`, `rotate-window`, and `precheck`. Once the threshold is reached, `rfuzz` fast-forwards through the remaining cases for that scope.
+`-stop-scope` can be combined with `-order`, `rotate-window`, and `precheck`. Once the threshold is reached, `rfuzz` fast-forwards through the remaining cases for the same grouping key.
 
-### Dry Run / Explain Plan
+### Safe Preview: dry-run / explain / request-dry-run
 
-Before a large scan, use dry-run mode to verify the request template, placeholders, wordlist sizes, estimated request count, concurrency, rate limit, precheck mode, output paths, response body limits, and the first rendered request:
+Before a large scan, use safe preview mode to verify the request template, placeholders, wordlist sizes, estimated request count, concurrency, rate limit, precheck mode, output paths, response body limits, and the first rendered request:
 
 ```bash
 rfuzz -w dirs.txt:DIR \
@@ -305,7 +369,7 @@ rfuzz -w dirs.txt:DIR \
   -dry-run
 ```
 
-`-explain` is an alias-style planning view for the same no-network safety check.
+`-explain` is an alias-style planning view for the same no-network safety check. With Burp raw request files, use `-request-dry-run` to inspect the first final raw request.
 
 ---
 
@@ -431,7 +495,7 @@ rfuzz -w files.txt:FILE \
 | `-u` | URL template. | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request file. | `-request login.txt` |
 | `-request-proto` | Protocol for raw request files. | `-request-proto https` |
-| `-request-dry-run` | Renders and prints the first final request without sending it. | `-request-dry-run` |
+| `-request-dry-run` | Safe preview for raw requests: renders and prints the first final request without sending it. | `-request-dry-run` |
 | `-X` | HTTP method. | `-X POST` |
 | `-H` | Header template, repeatable. | `-H "Content-Type: application/json"` |
 | `-d` | Request body template. | `-d 'q=${{FUZZ}}$'` |
@@ -463,8 +527,8 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-rate` | Global requests per second; `0` disables the limit. | `-rate 50` |
 | `-timeout` | Request timeout in seconds. | `-timeout 10` |
 | `-p` | Fixed or random request delay range. | `-p 0.1-0.5` |
-| `-dry-run` | Prints the execution plan without sending requests. | `-dry-run` |
-| `-explain` | Explains the execution plan without sending requests. | `-explain` |
+| `-dry-run` | Safe preview: prints the plan and first rendered request without sending requests. | `-dry-run` |
+| `-explain` | Explains the safe-preview plan without sending requests. | `-explain` |
 | `-no-progress` | Disables the progress bar. | `-no-progress` |
 | `-precheck` | Enables or disables precheck. | `-precheck off` |
 | `-precheck-key` | Target precheck keyword. | `-precheck-key TARGET` |

@@ -18,7 +18,7 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 
 ## 这是什么？
 
-`rfuzz` 是一个轻量、可脚本化的 Web fuzzing 工具。它保留了常见 `ffuf` 使用习惯，同时针对大规模多目标任务补充了 dry-run 执行计划、预检查、目标轮转、scope 级停止、DNS 缓存、响应 body 限制、任务结束摘要、错误日志和结构化输出能力。
+`rfuzz` 是一个轻量、可脚本化的 Web fuzzing 工具。它保留了常见 `ffuf` 使用习惯，同时针对大规模多目标任务补充了安全预演、预检查、目标轮转、按作用域停止、DNS 缓存、响应 body 限制、任务结束摘要、错误日志和结构化输出能力。
 
 适合用于：
 
@@ -41,8 +41,8 @@ English: a conservative Rust web fuzzer for authorized testing, with familiar ff
 | 惰性生成 | 大规模笛卡尔积不会一次性加载全部请求组合。 |
 | 目标预检查 | `-precheck-key` 先探测目标是否可达，失败 payload 默认跳过。 |
 | 目标轮转 | `-schedule rotate-window` 适合多 URL、多账号、多密码场景，避免长时间打同一个目标。 |
-| scope 级停止 | `-stop-scope` + `-stop-on-match` 可以让某个 URL、用户或组合命中后提前跳过剩余请求。 |
-| dry-run 计划 | `-dry-run`、`-explain`、`-request-dry-run` 可以在发送任何网络请求前查看执行计划或最终请求。 |
+| 按作用域停止 | 命中后可按 `TARGET`、`USER` 或 `TARGET,USER` 这样的分组提前跳过剩余组合。详见“scope：停止计数的分组键”。 |
+| 安全预演 | `-dry-run` / `-explain` / `-request-dry-run` 可在不发送请求的情况下检查计划和最终请求。 |
 | HTTP 调优 | 支持代理、重定向、HTTP/2、keep-alive、DNS 缓存、超时、延迟、全局限速。 |
 | 结构化输出 | 支持可读的 `[MATCH]` 命中行、silent URL、JSONL、CSV、原始请求/响应保存、错误 JSONL 日志和 JSON 任务摘要。 |
 
@@ -151,6 +151,42 @@ rfuzz -request login.txt \
   -w passwords.txt:PASS \
   -request-dry-run
 ```
+
+---
+
+## 容易混淆的概念
+
+### 安全预演：dry-run / explain / request-dry-run
+
+dry-run 可以理解为“只预演，不执行”。
+
+启用 `-dry-run` 后，`rfuzz` 会加载字典、解析模板、计算预计请求数、应用组合模式、调度策略、并发、限速、预检查配置和输出配置，并渲染首个最终请求供你检查；但不会发送任何 HTTP 请求。
+
+这适合在大任务开始前确认三件事：
+
+1. placeholder 是否替换正确；
+2. 请求数量是否符合预期；
+3. 最终请求是否会打到正确目标。
+
+| 参数 | 适合什么时候用 | 做什么 |
+| --- | --- | --- |
+| `-dry-run` | 普通 URL 模板任务 | 打印完整执行计划和首个渲染请求。 |
+| `-explain` | 想确认任务配置 | 和 `-dry-run` 类似，强调解释计划。 |
+| `-request-dry-run` | 使用 Burp raw request 文件时 | 渲染并打印首个最终 raw request，不发送请求。 |
+
+### request-dry-run：只渲染 raw request，不发请求
+
+`-request-dry-run` 是 raw request 文件场景下的安全预演。它会读取 Burp 导出的请求、替换 placeholder、补全目标协议、重算 `Content-Length`，然后打印首个最终 raw request；打印后任务结束，不会发出网络请求。
+
+### scope：停止计数的分组键
+
+在 `rfuzz` 里，scope 指的是由一个或多个 wordlist keyword 组成的“分组键”。
+
+`-stop-scope TARGET` 表示：每个 `TARGET` 单独计数，某个 `TARGET` 命中达到阈值后，跳过这个 `TARGET` 的剩余组合。
+
+`-stop-scope TARGET,USER` 表示：每个 `TARGET + USER` 组合单独计数，某个目标上的某个用户命中后，只跳过这个用户的剩余密码，不影响同一目标上的其他用户。
+
+`-stop-scope` 里的 keyword 必须来自 `-w file:KEYWORD` 定义的字典。运行时，`rfuzz` 会从当前 case 中取出这些 keyword 的值组成 key；命中数达到 `-stop-on-match` 后，相同 key 的后续 case 会被跳过。
 
 ---
 
@@ -268,7 +304,25 @@ rfuzz -u https://TARGET/login \
 
 ### 命中后停止
 
-命中一次后跳过该目标的剩余组合：
+假设有：
+
+```text
+TARGET = [a.com, b.com]
+USER   = [alice, bob]
+PASS   = [123456, admin, qwerty]
+```
+
+#### 示例 A：`-stop-scope TARGET -stop-on-match 1`
+
+含义：每个目标只要命中 1 次，就跳过该目标的所有剩余 `USER/PASS` 组合。
+
+如果 `a.com + alice + admin` 命中，那么：
+
+- `a.com + alice + qwerty` 会跳过；
+- `a.com + bob + 123456/admin/qwerty` 也会跳过；
+- `b.com` 不受影响，继续跑。
+
+对应命令：
 
 ```bash
 rfuzz -u https://TARGET/login \
@@ -280,7 +334,17 @@ rfuzz -u https://TARGET/login \
   -stop-on-match 1
 ```
 
-只跳过当前目标 + 当前用户的剩余密码：
+#### 示例 B：`-stop-scope TARGET,USER -stop-on-match 1`
+
+含义：每个“目标 + 用户”组合只要命中 1 次，就跳过该用户在该目标上的剩余密码。
+
+如果 `a.com + alice + admin` 命中，那么：
+
+- `a.com + alice + qwerty` 会跳过；
+- `a.com + bob + ...` 继续跑；
+- `b.com + alice + ...` 也继续跑。
+
+对应命令：
 
 ```bash
 rfuzz -u https://TARGET/login \
@@ -292,11 +356,11 @@ rfuzz -u https://TARGET/login \
   -stop-on-match 1
 ```
 
-`-stop-scope` 也可以和 `-order`、`rotate-window`、`precheck` 一起使用。达到停止阈值后，`rfuzz` 会快进跳过该 scope 的剩余组合。
+`-stop-scope` 也可以和 `-order`、`rotate-window`、`precheck` 一起使用。达到停止阈值后，`rfuzz` 会快进跳过相同分组键的剩余组合。
 
-### Dry Run / 执行计划
+### 安全预演：dry-run / explain / request-dry-run
 
-大任务开始前，可以用 dry-run 检查请求模板、placeholder、字典大小、预计请求数、并发、限速、预检查模式、输出路径、响应 body 限制，以及首个渲染后的最终请求：
+大任务开始前，可以用安全预演检查请求模板、placeholder、字典大小、预计请求数、并发、限速、预检查模式、输出路径、响应 body 限制，以及首个渲染后的最终请求：
 
 ```bash
 rfuzz -w dirs.txt:DIR \
@@ -305,7 +369,7 @@ rfuzz -w dirs.txt:DIR \
   -dry-run
 ```
 
-`-explain` 也是不发送网络请求的计划说明视图。
+`-explain` 也是不发送网络请求的计划说明视图；使用 Burp raw request 文件时，用 `-request-dry-run` 查看首个最终 raw request。
 
 ---
 
@@ -431,7 +495,7 @@ rfuzz -w files.txt:FILE \
 | `-u` | URL 模板。 | `-u https://HOST/FUZZ` |
 | `-request` | Burp raw request 文件。 | `-request login.txt` |
 | `-request-proto` | raw request 协议。 | `-request-proto https` |
-| `-request-dry-run` | 渲染并打印首个最终请求，不发送请求。 | `-request-dry-run` |
+| `-request-dry-run` | 安全预演 raw request：渲染并打印首个最终请求，不发送请求。 | `-request-dry-run` |
 | `-X` | HTTP 方法。 | `-X POST` |
 | `-H` | Header 模板，可重复。 | `-H "Content-Type: application/json"` |
 | `-d` | 请求体模板。 | `-d 'q=${{FUZZ}}$'` |
@@ -463,8 +527,8 @@ rfuzz -w files.txt:FILE \
 | `-rate` | 全局每秒请求数，`0` 表示不限速。 | `-rate 50` |
 | `-timeout` | 请求超时秒数。 | `-timeout 10` |
 | `-p` | 请求间延迟或随机范围。 | `-p 0.1-0.5` |
-| `-dry-run` | 输出执行计划，不发送请求。 | `-dry-run` |
-| `-explain` | 解释执行计划，不发送请求。 | `-explain` |
+| `-dry-run` | 安全预演：输出计划和首个渲染请求，不发送请求。 | `-dry-run` |
+| `-explain` | 解释安全预演计划，不发送请求。 | `-explain` |
 | `-no-progress` | 关闭进度条。 | `-no-progress` |
 | `-precheck` | 开关预检查。 | `-precheck off` |
 | `-precheck-key` | 目标预检查 keyword。 | `-precheck-key TARGET` |
