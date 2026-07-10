@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -248,6 +248,8 @@ rfuzz -u https://TARGET/login \
 
 预检查只遍历 `-precheck-key` 对应 payload，不会组合其他字典。预检查 URL 会和主请求一样应用 `-enc` 编码链，并使用同样的 URL 空格归一化逻辑。预检查使用独立超时，默认 `-precheck-timeout 3`，并优先用 `HEAD` 探测；如果 `HEAD` 不允许或失败，再 fallback 到 `GET`。只要能收到 HTTP 响应，就视为目标可达；`200`、`301`、`401`、`403`、`404`、`500` 等状态码都算可达。
 
+预检查会去重相同的目标值，并在 `stderr` 显示独立的逐轮进度条。显式的 `HEAD`/`GET` 回退请求以及协议候选都会分别计入全局 `-rate` 限速；`-no-progress` 会同时关闭预检查和主任务进度条。
+
 关闭预检查：
 
 ```bash
@@ -380,7 +382,7 @@ rfuzz -w dirs.txt:DIR \
 
 ## 输出与进度
 
-默认情况下，`rfuzz` 在 `stderr` 显示进度条，不污染写到 `stdout` 或 `-o` 的结果。
+默认情况下，`rfuzz` 在 `stderr` 显示预检查和主任务进度条，不污染写到 `stdout` 或 `-o` 的结果。
 
 进度字段：
 
@@ -534,7 +536,7 @@ rfuzz -w files.txt:FILE \
 | `-p` | 请求间有限延迟或随机范围；拒绝 NaN/inf。 | `-p 0.1-0.5` |
 | `-dry-run` | 安全预演：输出计划和首个渲染请求，不发送请求。 | `-dry-run` |
 | `-explain` | 解释安全预演计划，不发送请求。 | `-explain` |
-| `-no-progress` | 关闭进度条。 | `-no-progress` |
+| `-no-progress` | 关闭预检查和主任务进度条。 | `-no-progress` |
 | `-precheck` | 开关预检查。 | `-precheck off` |
 | `-precheck-key` | 目标预检查 keyword。 | `-precheck-key TARGET` |
 | `-precheck-report-only` | 只报告，不跳过失败 payload。 | `-precheck-report-only` |

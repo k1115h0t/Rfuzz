@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, Result};
@@ -45,17 +46,20 @@ impl EncoderSet {
         Ok(())
     }
 
-    pub fn apply_to_map(
+    pub fn apply_to_map<'a>(
         &self,
-        values: &crate::template::render::InputMap,
-    ) -> crate::template::render::InputMap {
+        values: &'a crate::template::render::InputMap,
+    ) -> Cow<'a, crate::template::render::InputMap> {
+        if self.chains.is_empty() {
+            return Cow::Borrowed(values);
+        }
         let mut encoded = values.clone();
         for (keyword, encoders) in &self.chains {
             if let Some(value) = values.get(keyword) {
                 encoded.insert(keyword.clone(), apply_chain(value, encoders));
             }
         }
-        encoded
+        Cow::Owned(encoded)
     }
 }
 
@@ -106,5 +110,15 @@ mod tests {
         let values = BTreeMap::from([("FUZZ".to_string(), "a b".to_string())]);
         let encoded = encoders.apply_to_map(&values);
         assert_eq!(encoded["FUZZ"], "YSti");
+    }
+
+    #[test]
+    fn borrows_input_map_when_no_encoders_are_configured() {
+        let encoders = EncoderSet::default();
+        let values = BTreeMap::from([("FUZZ".to_string(), "value".to_string())]);
+
+        let encoded = encoders.apply_to_map(&values);
+
+        assert!(matches!(encoded, Cow::Borrowed(_)));
     }
 }

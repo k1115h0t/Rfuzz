@@ -58,7 +58,9 @@ pub async fn run(config: Config) -> Result<()> {
     } else {
         client.clone()
     };
-    let precheck_skipper = precheck::run(&config, &wordlists, precheck_client).await?;
+    let limiter = RateLimiter::new(config.execution.rate_per_sec);
+    let precheck_skipper =
+        precheck::run(&config, &wordlists, precheck_client, limiter.clone()).await?;
     let precheck_skipped =
         fast_filter_precheck_failures(&config, &mut wordlists, precheck_skipper.as_deref());
     let precheck_skipper = if precheck_skipped > 0 {
@@ -82,7 +84,6 @@ pub async fn run(config: Config) -> Result<()> {
     } else {
         None
     };
-    let limiter = RateLimiter::new(config.execution.rate_per_sec);
     let writer = Arc::new(Mutex::new(build_writer(&config.output)?));
     let error_logger = Arc::new(Mutex::new(build_error_logger(
         config.output.error_log.as_deref(),
@@ -530,6 +531,8 @@ async fn run_with_case_queue(
     progress: ProgressReporter,
     precheck_skipper: Option<Arc<PrecheckSkipper>>,
 ) -> Result<()> {
+    let request_config = Arc::new(config.request.clone());
+    let encoders = Arc::new(config.input.encoders.clone());
     let queue_capacity = case_queue_capacity(config.execution.concurrency);
     let mut case_queue = VecDeque::with_capacity(queue_capacity);
     let mut join_set = JoinSet::new();
@@ -549,10 +552,10 @@ async fn run_with_case_queue(
             &mut join_set,
             input,
             client.clone(),
-            config.request.clone(),
+            request_config.clone(),
             limiter.clone(),
             config.execution.delay,
-            config.input.encoders.clone(),
+            encoders.clone(),
             writer.clone(),
             error_logger.clone(),
             matcher.clone(),
@@ -580,10 +583,10 @@ async fn run_with_case_queue(
                 &mut join_set,
                 input,
                 client.clone(),
-                config.request.clone(),
+                request_config.clone(),
                 limiter.clone(),
                 config.execution.delay,
-                config.input.encoders.clone(),
+                encoders.clone(),
                 writer.clone(),
                 error_logger.clone(),
                 matcher.clone(),
@@ -612,6 +615,8 @@ async fn run_with_order_batches(
     enable_scope_stop: bool,
     precheck_skipper: Option<Arc<PrecheckSkipper>>,
 ) -> Result<()> {
+    let request_config = Arc::new(config.request.clone());
+    let encoders = Arc::new(config.input.encoders.clone());
     let batch_scope = config.input.order[..config.input.order.len().saturating_sub(1)].to_vec();
     let scope_stop = enable_scope_stop.then(|| {
         Arc::new(Mutex::new(ScopeStopTracker::new(
@@ -637,10 +642,10 @@ async fn run_with_order_batches(
                 &mut join_set,
                 input,
                 client.clone(),
-                config.request.clone(),
+                request_config.clone(),
                 limiter.clone(),
                 config.execution.delay,
-                config.input.encoders.clone(),
+                encoders.clone(),
                 writer.clone(),
                 error_logger.clone(),
                 matcher.clone(),
@@ -665,10 +670,10 @@ async fn run_with_order_batches(
                     &mut join_set,
                     input,
                     client.clone(),
-                    config.request.clone(),
+                    request_config.clone(),
                     limiter.clone(),
                     config.execution.delay,
-                    config.input.encoders.clone(),
+                    encoders.clone(),
                     writer.clone(),
                     error_logger.clone(),
                     matcher.clone(),
@@ -715,10 +720,10 @@ fn spawn_case(
     join_set: &mut JoinSet<Result<()>>,
     input: InputCase,
     client: reqwest::Client,
-    request_config: crate::config::RequestConfig,
+    request_config: Arc<crate::config::RequestConfig>,
     limiter: RateLimiter,
     delay: crate::engine::rate_limiter::DelayConfig,
-    encoders: crate::input::encoder::EncoderSet,
+    encoders: Arc<crate::input::encoder::EncoderSet>,
     writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
     error_logger: Arc<Mutex<Option<ErrorLogger>>>,
     matcher: Arc<crate::matcher::legacy::MatcherConfig>,
@@ -736,13 +741,16 @@ fn spawn_case(
             delay,
             encoders,
             response_need,
-            input.clone(),
+            input,
         )
         .await
         {
             Ok(result) => {
-                let signature = result.response.signature.clone();
-                let matched_input = result.input.clone();
+                let matched_scope_key = if let Some(scope_stop) = &scope_stop {
+                    Some(scope_stop.lock().await.key(&result.input))
+                } else {
+                    None
+                };
                 match handle_match_result(
                     result,
                     matcher.as_ref(),
@@ -752,10 +760,11 @@ fn spawn_case(
                 )
                 .await
                 {
-                    Ok(matched) => {
+                    Ok((matched, signature)) => {
                         if matched {
-                            if let Some(scope_stop) = &scope_stop {
-                                scope_stop.lock().await.record_match(&matched_input);
+                            if let (Some(scope_stop), Some(key)) = (&scope_stop, matched_scope_key)
+                            {
+                                scope_stop.lock().await.record_match_key(key);
                             }
                         }
                         progress.record_response_signature(matched, &signature);
@@ -791,6 +800,8 @@ async fn run_with_global_scoped_stop(
     progress: ProgressReporter,
     precheck_skipper: Option<Arc<PrecheckSkipper>>,
 ) -> Result<()> {
+    let request_config = Arc::new(config.request.clone());
+    let encoders = Arc::new(config.input.encoders.clone());
     let max_hits = config.future.stop.stop_on_match.unwrap_or(1);
     let scope_stop = Arc::new(Mutex::new(ScopeStopTracker::new(
         config.future.stop.stop_scope.clone(),
@@ -812,10 +823,10 @@ async fn run_with_global_scoped_stop(
             &mut join_set,
             input,
             client.clone(),
-            config.request.clone(),
+            request_config.clone(),
             limiter.clone(),
             config.execution.delay,
-            config.input.encoders.clone(),
+            encoders.clone(),
             writer.clone(),
             error_logger.clone(),
             matcher.clone(),
@@ -840,10 +851,10 @@ async fn run_with_global_scoped_stop(
                 &mut join_set,
                 input,
                 client.clone(),
-                config.request.clone(),
+                request_config.clone(),
                 limiter.clone(),
                 config.execution.delay,
-                config.input.encoders.clone(),
+                encoders.clone(),
                 writer.clone(),
                 error_logger.clone(),
                 matcher.clone(),
@@ -891,6 +902,8 @@ async fn run_with_scoped_stop(
     progress: ProgressReporter,
     precheck_skipper: Option<Arc<PrecheckSkipper>>,
 ) -> Result<()> {
+    let request_config = Arc::new(config.request.clone());
+    let encoders = Arc::new(config.input.encoders.clone());
     let max_hits = config.future.stop.stop_on_match.unwrap_or(1);
     let fast_precheck_skip_scope = precheck_skipper
         .as_ref()
@@ -905,10 +918,10 @@ async fn run_with_scoped_stop(
             scope_cases,
             max_hits,
             client.clone(),
-            config.request.clone(),
+            request_config.clone(),
             limiter.clone(),
             config.execution.delay,
-            config.input.encoders.clone(),
+            encoders.clone(),
             writer.clone(),
             error_logger.clone(),
             matcher.clone(),
@@ -928,10 +941,10 @@ async fn run_with_scoped_stop(
                 scope_cases,
                 max_hits,
                 client.clone(),
-                config.request.clone(),
+                request_config.clone(),
                 limiter.clone(),
                 config.execution.delay,
-                config.input.encoders.clone(),
+                encoders.clone(),
                 writer.clone(),
                 error_logger.clone(),
                 matcher.clone(),
@@ -952,10 +965,10 @@ fn spawn_scope(
     mut scope_cases: ScopeCases,
     max_hits: usize,
     client: reqwest::Client,
-    request_config: crate::config::RequestConfig,
+    request_config: Arc<crate::config::RequestConfig>,
     limiter: RateLimiter,
     delay: crate::engine::rate_limiter::DelayConfig,
-    encoders: crate::input::encoder::EncoderSet,
+    encoders: Arc<crate::input::encoder::EncoderSet>,
     writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
     error_logger: Arc<Mutex<Option<ErrorLogger>>>,
     matcher: Arc<crate::matcher::legacy::MatcherConfig>,
@@ -993,13 +1006,12 @@ fn spawn_scope(
                 delay,
                 encoders.clone(),
                 matcher.response_need(),
-                input.clone(),
+                input,
             )
             .await
             {
                 Ok(result) => {
-                    let signature = result.response.signature.clone();
-                    let matched = handle_match_result(
+                    let (matched, signature) = handle_match_result(
                         result,
                         matcher.as_ref(),
                         writer.clone(),
@@ -1074,8 +1086,8 @@ impl ScopeStopTracker {
             .is_some_and(|hits| *hits >= self.max_hits)
     }
 
-    fn record_match(&mut self, input: &InputCase) {
-        *self.hits.entry(self.key(input)).or_default() += 1;
+    fn record_match_key(&mut self, key: Vec<String>) {
+        *self.hits.entry(key).or_default() += 1;
     }
 
     fn key(&self, input: &InputCase) -> Vec<String> {
@@ -1092,23 +1104,19 @@ async fn handle_match_result(
     writer: Arc<Mutex<Box<dyn crate::output::ResultWriter>>>,
     replay_client: Option<reqwest::Client>,
     output_directory: Option<String>,
-) -> Result<bool> {
-    let response_text = if matcher.response_need() == crate::matcher::legacy::ResponseNeed::BodyText
-    {
-        Some(result.response.raw_response().to_string())
-    } else {
-        None
-    };
+) -> Result<(bool, crate::matcher::signature::ResponseSignature)> {
     let headers_text = matcher
         .uses_response_headers()
         .then(|| result.response.header_text());
+    let include_raw = matcher.response_need() == crate::matcher::legacy::ResponseNeed::BodyText;
+    let (signature, response_text) = result.response.matcher_view(include_raw);
     let matched = matcher.should_output(
-        &result.response.signature,
-        response_text.as_deref().unwrap_or_default(),
+        signature,
+        response_text,
         headers_text.as_deref().unwrap_or_default(),
     );
     if !matched {
-        return Ok(false);
+        return Ok((false, result.response.signature));
     }
 
     result.response.ensure_title();
@@ -1138,7 +1146,7 @@ async fn handle_match_result(
         )
         .await;
     }
-    Ok(true)
+    Ok((true, result.response.signature))
 }
 
 #[cfg(test)]
@@ -1217,7 +1225,7 @@ mod tests {
             ),
         };
 
-        let matched = handle_match_result(result, &matcher, writer, None, None)
+        let (matched, _) = handle_match_result(result, &matcher, writer, None, None)
             .await
             .unwrap();
 
@@ -1254,7 +1262,7 @@ mod tests {
         };
 
         assert!(!tracker.should_skip(&url1_first));
-        tracker.record_match(&url1_first);
+        tracker.record_match_key(tracker.key(&url1_first));
         assert!(!tracker.should_skip(&url2));
         assert!(tracker.should_skip(&url1_later));
     }

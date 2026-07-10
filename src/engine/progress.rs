@@ -289,6 +289,101 @@ struct ProgressReporterInner {
     bar: Option<ProgressBar>,
 }
 
+#[derive(Debug, Default)]
+struct PrecheckProgressState {
+    attempt: usize,
+    attempts: usize,
+    round_total: usize,
+    round_completed: usize,
+    probes: usize,
+    reachable: usize,
+    round_unreachable: usize,
+}
+
+impl PrecheckProgressState {
+    fn start_round(&mut self, attempt: usize, attempts: usize, round_total: usize) {
+        self.attempt = attempt;
+        self.attempts = attempts;
+        self.round_total = round_total;
+        self.round_completed = 0;
+        self.round_unreachable = 0;
+    }
+
+    fn record_probe(&mut self, reachable: bool) {
+        self.round_completed = self.round_completed.saturating_add(1).min(self.round_total);
+        self.probes = self.probes.saturating_add(1);
+        if reachable {
+            self.reachable = self.reachable.saturating_add(1);
+        } else {
+            self.round_unreachable = self.round_unreachable.saturating_add(1);
+        }
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "round {}/{} | probes {} | reachable {} | unreachable {}",
+            self.attempt, self.attempts, self.probes, self.reachable, self.round_unreachable
+        )
+    }
+}
+
+pub struct PrecheckProgressReporter {
+    state: PrecheckProgressState,
+    bar: Option<ProgressBar>,
+}
+
+impl PrecheckProgressReporter {
+    pub fn new(enabled: bool) -> Self {
+        let bar = enabled.then(|| {
+            let bar = ProgressBar::with_draw_target(
+                Some(0),
+                ProgressDrawTarget::stderr_with_hz(4),
+            );
+            let style = ProgressStyle::with_template(
+                "PRECHECK {spinner:.green} [{bar:40.magenta/blue}] {pos}/{len} {percent}% | {msg} | ETA {eta}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=>-");
+            bar.set_style(style);
+            bar.enable_steady_tick(Duration::from_millis(250));
+            bar
+        });
+        Self {
+            state: PrecheckProgressState::default(),
+            bar,
+        }
+    }
+
+    pub fn start_round(&mut self, attempt: usize, attempts: usize, round_total: usize) {
+        self.state.start_round(attempt, attempts, round_total);
+        if let Some(bar) = &self.bar {
+            bar.reset();
+            bar.set_length(round_total as u64);
+            bar.set_message(self.state.message());
+        }
+    }
+
+    pub fn record_probe(&mut self, reachable: bool) {
+        self.state.record_probe(reachable);
+        if let Some(bar) = &self.bar {
+            bar.set_position(self.state.round_completed as u64);
+            bar.set_message(self.state.message());
+        }
+    }
+
+    pub fn finish(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for PrecheckProgressReporter {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl ProgressReporter {
     pub fn new(total: usize, enabled: bool) -> Self {
         let bar = enabled.then(|| {
@@ -483,5 +578,29 @@ mod tests {
             text,
             "matched 2 | errors 3 | skipped 4 | err timeout 2,dns 1 | ETA 01:05"
         );
+    }
+
+    #[test]
+    fn tracks_precheck_progress_by_retry_round() {
+        let mut state = PrecheckProgressState::default();
+
+        state.start_round(1, 3, 2);
+        state.record_probe(true);
+        state.record_probe(false);
+        assert_eq!(state.round_completed, 2);
+        assert_eq!(state.probes, 2);
+        assert_eq!(state.reachable, 1);
+        assert_eq!(state.round_unreachable, 1);
+        assert_eq!(
+            state.message(),
+            "round 1/3 | probes 2 | reachable 1 | unreachable 1"
+        );
+
+        state.start_round(2, 3, 1);
+        assert_eq!(state.round_completed, 0);
+        assert_eq!(state.round_unreachable, 0);
+        state.record_probe(true);
+        assert_eq!(state.probes, 3);
+        assert_eq!(state.reachable, 2);
     }
 }

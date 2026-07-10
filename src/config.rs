@@ -280,6 +280,17 @@ impl TryFrom<Cli> for Config {
         };
         if let Some(key) = &precheck.key {
             validate_keywords_exist("-precheck-key", std::slice::from_ref(key), &keywords)?;
+            if precheck.enabled {
+                let url = url.as_ref().ok_or_else(|| {
+                    anyhow!("-precheck-key requires -u URL; raw request precheck is not supported")
+                })?;
+                if !url.placeholders().contains(key) {
+                    return Err(anyhow!(
+                        "-precheck-key '{}' must be used by the -u URL template",
+                        key
+                    ));
+                }
+            }
         }
         let schedule = parse_schedule(&cli, &wordlists, &keywords, &stop_scope, &precheck)?;
 
@@ -687,6 +698,23 @@ mod tests {
         let error = Config::try_from(cli).unwrap_err().to_string();
 
         assert!(error.contains("-precheck-key references unknown keyword: MISSING"));
+    }
+
+    #[test]
+    fn rejects_precheck_key_that_is_not_used_by_url() {
+        let cli = Cli::parse_from([
+            "rfuzz",
+            "-u",
+            "https://example.com/login",
+            "-w",
+            "urls.txt:URLFUZZ",
+            "--precheck-key",
+            "URLFUZZ",
+        ]);
+
+        let error = Config::try_from(cli).unwrap_err().to_string();
+
+        assert!(error.contains("must be used by the -u URL template"));
     }
 
     #[test]

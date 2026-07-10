@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -248,6 +248,8 @@ rfuzz -u https://TARGET/login \
 
 Precheck only iterates the payloads for `-precheck-key`; it does not combine other wordlists. Precheck URLs apply the same `-enc` encoder chain and URL space normalization as normal requests. Precheck uses its own timeout, `-precheck-timeout 3` by default, and probes with `HEAD` first before falling back to `GET` when `HEAD` is not allowed or fails. Any received HTTP response counts as reachable, including `200`, `301`, `401`, `403`, `404`, and `500`.
 
+Precheck deduplicates identical target values and shows a separate per-round progress bar on `stderr`. Explicit `HEAD`/`GET` fallbacks and protocol candidates each consume the global `-rate` limit. `-no-progress` disables both the precheck and main progress bars.
+
 Disable precheck:
 
 ```bash
@@ -380,7 +382,7 @@ rfuzz -w dirs.txt:DIR \
 
 ## Output And Progress
 
-By default, `rfuzz` writes its progress bar to `stderr`, so it does not pollute `stdout` or files written with `-o`.
+By default, `rfuzz` writes its precheck and main progress bars to `stderr`, so they do not pollute `stdout` or files written with `-o`.
 
 Progress fields:
 
@@ -534,7 +536,7 @@ Supported encoders: `urlencode`, `b64encode` / `base64`, `hex`, `lower`, `upper`
 | `-p` | Fixed or random finite request delay range; rejects NaN/inf. | `-p 0.1-0.5` |
 | `-dry-run` | Safe preview: prints the plan and first rendered request without sending requests. | `-dry-run` |
 | `-explain` | Explains the safe-preview plan without sending requests. | `-explain` |
-| `-no-progress` | Disables the progress bar. | `-no-progress` |
+| `-no-progress` | Disables the precheck and main progress bars. | `-no-progress` |
 | `-precheck` | Enables or disables precheck. | `-precheck off` |
 | `-precheck-key` | Target precheck keyword. | `-precheck-key TARGET` |
 | `-precheck-report-only` | Reports failures without skipping failed payloads. | `-precheck-report-only` |

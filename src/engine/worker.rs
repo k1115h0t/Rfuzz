@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use reqwest::Client;
@@ -31,40 +32,47 @@ pub struct WorkerError {
 
 pub async fn execute_case(
     client: Client,
-    request_config: RequestConfig,
+    request_config: Arc<RequestConfig>,
     limiter: RateLimiter,
     delay: DelayConfig,
-    encoders: EncoderSet,
+    encoders: Arc<EncoderSet>,
     response_need: ResponseNeed,
     input: InputCase,
 ) -> std::result::Result<WorkerResult, WorkerError> {
     delay.wait().await;
     limiter.wait().await;
     let render_values = encoders.apply_to_map(&input.values);
-    let rendered =
-        RenderedRequest::from_config(&request_config, &render_values).map_err(|error| {
-            WorkerError {
-                input: input.clone(),
+    let rendered = match RenderedRequest::from_config(request_config.as_ref(), &render_values) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(WorkerError {
+                input,
                 url: None,
                 error,
                 elapsed_ms: 0,
-            }
-        })?;
+            });
+        }
+    };
     let url = rendered.url.clone();
     let started = Instant::now();
-    let response = client::execute(
+    let response = match client::execute(
         &client,
         &rendered,
         request_config.response_body,
         response_need,
     )
     .await
-    .map_err(|error| WorkerError {
-        input: input.clone(),
-        url: Some(url.clone()),
-        error,
-        elapsed_ms: started.elapsed().as_millis(),
-    })?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return Err(WorkerError {
+                input,
+                url: Some(url),
+                error,
+                elapsed_ms: started.elapsed().as_millis(),
+            });
+        }
+    };
     Ok(WorkerResult {
         input,
         url,

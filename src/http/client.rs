@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use reqwest::Client;
 
 use crate::config::{RequestConfig, ResponseBodyConfig};
@@ -95,27 +94,24 @@ pub async fn execute(
 async fn read_body_with_limit(
     mut response: reqwest::Response,
     body_config: ResponseBodyConfig,
-) -> Result<(Bytes, bool)> {
+) -> Result<(Vec<u8>, bool)> {
     let content_length = response.content_length();
     if body_config.ignore || body_config.max_bytes == 0 {
-        return Ok((
-            Bytes::new(),
-            content_length.is_some_and(|length| length > 0),
-        ));
+        return Ok((Vec::new(), content_length.is_some_and(|length| length > 0)));
     }
 
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         let remaining = body_config.max_bytes.saturating_sub(body.len());
         if remaining == 0 {
-            return Ok((Bytes::from(body), true));
+            return Ok((body, true));
         }
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
-            return Ok((Bytes::from(body), true));
+            return Ok((body, true));
         }
         body.extend_from_slice(&chunk);
     }
 
-    Ok((Bytes::from(body), false))
+    Ok((body, false))
 }

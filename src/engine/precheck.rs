@@ -1,18 +1,31 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use reqwest::{Client, StatusCode};
 use tokio::task::JoinSet;
 
 use crate::config::Config;
+use crate::engine::progress::PrecheckProgressReporter;
 use crate::engine::rate_limiter::RateLimiter;
 use crate::http::request::normalize_url;
+use crate::input::encoder::EncoderSet;
 use crate::input::modes::InputCase;
 use crate::input::wordlist::WordlistData;
 use crate::template::render::InputMap;
+use crate::template::Template;
 
 type PrecheckCaseResult = Result<Option<(String, Vec<String>)>>;
+
+struct PrecheckContext {
+    keywords: Vec<String>,
+    key: String,
+    template: Template,
+    encoders: EncoderSet,
+    raw_uri: bool,
+    client: Client,
+    limiter: RateLimiter,
+}
 
 #[derive(Debug)]
 pub struct PrecheckSkipper {
@@ -49,6 +62,7 @@ pub async fn run(
     config: &Config,
     wordlists: &[WordlistData],
     client: Client,
+    limiter: RateLimiter,
 ) -> Result<Option<Arc<PrecheckSkipper>>> {
     if !config.precheck.enabled {
         return Ok(None);
@@ -63,7 +77,7 @@ pub async fn run(
         return Ok(None);
     }
 
-    let failed_values = run_url_precheck(config, wordlists, wordlist, &client).await?;
+    let failed_values = run_url_precheck(config, wordlists, wordlist, &client, limiter).await?;
     if failed_values.is_empty() || config.precheck.report_only {
         Ok(None)
     } else {
@@ -76,13 +90,30 @@ async fn run_url_precheck(
     wordlists: &[WordlistData],
     wordlist: &WordlistData,
     client: &Client,
+    limiter: RateLimiter,
 ) -> Result<HashSet<String>> {
     let key = &wordlist.keyword;
-    let limiter = RateLimiter::new(config.execution.rate_per_sec);
     let mut failed_values = HashSet::new();
-    let wordlists = Arc::new(wordlists.to_vec());
+    let mut final_failures = Vec::new();
+    let context = Arc::new(PrecheckContext {
+        keywords: wordlists
+            .iter()
+            .map(|wordlist| wordlist.keyword.clone())
+            .collect(),
+        key: key.clone(),
+        template: config
+            .request
+            .url
+            .clone()
+            .ok_or_else(|| anyhow!("precheck requires a URL template"))?,
+        encoders: config.input.encoders.clone(),
+        raw_uri: config.request.raw_uri,
+        client: client.clone(),
+        limiter,
+    });
     let attempts = config.precheck.attempts.max(1);
-    let mut pending_values = wordlist.values.clone();
+    let mut pending_values = unique_precheck_values(&wordlist.values);
+    let mut progress = PrecheckProgressReporter::new(config.output.progress);
 
     for attempt in 1..=attempts {
         if pending_values.is_empty() {
@@ -91,6 +122,7 @@ async fn run_url_precheck(
 
         let mut join_set = JoinSet::new();
         let round_values = std::mem::take(&mut pending_values);
+        progress.start_round(attempt, attempts, round_values.len());
         let mut values = round_values.iter().cloned();
         let mut round_failures: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -98,39 +130,25 @@ async fn run_url_precheck(
             let Some(value) = values.next() else {
                 break;
             };
-            spawn_precheck_case(
-                &mut join_set,
-                config,
-                wordlists.clone(),
-                key,
-                value,
-                client.clone(),
-                limiter.clone(),
-            );
+            spawn_precheck_case(&mut join_set, context.clone(), value);
         }
 
         while let Some(result) = join_set.join_next().await {
-            if let Some((value, failures)) = result?? {
+            let result = result??;
+            progress.record_probe(result.is_none());
+            if let Some((value, failures)) = result {
                 round_failures.insert(value, failures);
             }
             if let Some(value) = values.next() {
-                spawn_precheck_case(
-                    &mut join_set,
-                    config,
-                    wordlists.clone(),
-                    key,
-                    value,
-                    client.clone(),
-                    limiter.clone(),
-                );
+                spawn_precheck_case(&mut join_set, context.clone(), value);
             }
         }
 
         if attempt == attempts {
             for value in round_values {
                 if let Some(failures) = round_failures.remove(&value) {
-                    eprintln!("PRECHECK ERROR {}={} {}", key, value, failures.join("; "));
-                    failed_values.insert(value);
+                    failed_values.insert(value.clone());
+                    final_failures.push((value, failures));
                 }
             }
         } else {
@@ -141,32 +159,32 @@ async fn run_url_precheck(
         }
     }
 
+    progress.finish();
+    for (value, failures) in final_failures {
+        eprintln!("PRECHECK ERROR {}={} {}", key, value, failures.join("; "));
+    }
+
     Ok(failed_values)
 }
 
 fn spawn_precheck_case(
     join_set: &mut JoinSet<PrecheckCaseResult>,
-    config: &Config,
-    wordlists: Arc<Vec<WordlistData>>,
-    key: &str,
+    context: Arc<PrecheckContext>,
     value: String,
-    client: Client,
-    limiter: RateLimiter,
 ) {
-    let Some(template) = config.request.url.clone() else {
-        return;
-    };
-    let encoders = config.input.encoders.clone();
-    let raw_uri = config.request.raw_uri;
-    let key = key.to_string();
     join_set.spawn(async move {
-        limiter.wait().await;
-        let rendered =
-            render_precheck_url(&encoders, raw_uri, &wordlists, &key, &value, &template)?;
+        let rendered = render_precheck_url(
+            &context.encoders,
+            context.raw_uri,
+            &context.keywords,
+            &context.key,
+            &value,
+            &context.template,
+        )?;
         let candidates = candidate_urls(&rendered);
         let mut failures = Vec::new();
         for url in &candidates {
-            match probe_precheck_url(&client, url).await {
+            match probe_precheck_url(&context.client, url, &context.limiter).await {
                 Ok(_) => return Ok(None),
                 Err(error) => {
                     failures.push(format!("{}: {}", url, brief_error(&error)));
@@ -177,7 +195,8 @@ fn spawn_precheck_case(
     });
 }
 
-async fn probe_precheck_url(client: &Client, url: &str) -> Result<()> {
+async fn probe_precheck_url(client: &Client, url: &str, limiter: &RateLimiter) -> Result<()> {
+    limiter.wait().await;
     match client.head(url).send().await {
         Ok(response)
             if response.status() != StatusCode::METHOD_NOT_ALLOWED
@@ -186,6 +205,7 @@ async fn probe_precheck_url(client: &Client, url: &str) -> Result<()> {
             Ok(())
         }
         Ok(_) | Err(_) => {
+            limiter.wait().await;
             client.get(url).send().await?;
             Ok(())
         }
@@ -193,14 +213,14 @@ async fn probe_precheck_url(client: &Client, url: &str) -> Result<()> {
 }
 
 fn render_precheck_url(
-    encoders: &crate::input::encoder::EncoderSet,
+    encoders: &EncoderSet,
     raw_uri: bool,
-    wordlists: &[WordlistData],
+    keywords: &[String],
     key: &str,
     value: &str,
-    template: &crate::template::Template,
+    template: &Template,
 ) -> Result<String> {
-    let input = precheck_input_values(wordlists, key, value);
+    let input = precheck_input_values(keywords, key, value);
     let input = encoders.apply_to_map(&input);
     let rendered = template.render(&input)?;
     Ok(normalize_url(&rendered, raw_uri))
@@ -211,7 +231,13 @@ fn resolve_precheck_key(config: &Config) -> Option<String> {
 }
 
 pub(crate) fn candidate_urls(rendered: &str) -> Vec<String> {
-    if rendered.starts_with("http://") || rendered.starts_with("https://") {
+    if rendered
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || rendered
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
         vec![rendered.to_string()]
     } else {
         vec![
@@ -221,17 +247,22 @@ pub(crate) fn candidate_urls(rendered: &str) -> Vec<String> {
     }
 }
 
-pub(crate) fn precheck_input_values(
-    wordlists: &[WordlistData],
-    key: &str,
-    value: &str,
-) -> InputMap {
-    wordlists
+fn unique_precheck_values(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(values.len());
+    values
         .iter()
-        .map(|wordlist| {
+        .filter(|value| seen.insert(value.as_str()))
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn precheck_input_values(keywords: &[String], key: &str, value: &str) -> InputMap {
+    keywords
+        .iter()
+        .map(|keyword| {
             (
-                wordlist.keyword.clone(),
-                if wordlist.keyword == key {
+                keyword.clone(),
+                if keyword == key {
                     value.to_string()
                 } else {
                     String::new()
@@ -338,21 +369,36 @@ mod tests {
     }
 
     #[test]
+    fn candidate_urls_accept_case_insensitive_http_schemes() {
+        assert_eq!(
+            candidate_urls("HTTPS://example.com/login"),
+            vec!["HTTPS://example.com/login".to_string()]
+        );
+    }
+
+    #[test]
+    fn precheck_deduplicates_target_values_without_reordering() {
+        let values = vec![
+            "one".to_string(),
+            "two".to_string(),
+            "one".to_string(),
+            "three".to_string(),
+            "two".to_string(),
+        ];
+
+        assert_eq!(
+            unique_precheck_values(&values),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+    }
+
+    #[test]
     fn precheck_values_only_put_real_payload_on_precheck_key() {
         let values = precheck_input_values(
             &[
-                WordlistData {
-                    keyword: "URLFUZZ".to_string(),
-                    values: vec!["example.com".to_string()],
-                },
-                WordlistData {
-                    keyword: "UFUZZ".to_string(),
-                    values: vec!["admin".to_string()],
-                },
-                WordlistData {
-                    keyword: "PFUZZ".to_string(),
-                    values: vec!["password".to_string()],
-                },
+                "URLFUZZ".to_string(),
+                "UFUZZ".to_string(),
+                "PFUZZ".to_string(),
             ],
             "URLFUZZ",
             "example.com",
@@ -377,16 +423,13 @@ mod tests {
             "TARGET",
         ]);
         let config = Config::try_from(cli).unwrap();
-        let wordlists = [WordlistData {
-            keyword: "TARGET".to_string(),
-            values: vec!["a b".to_string()],
-        }];
+        let keywords = ["TARGET".to_string()];
         let template = config.request.url.as_ref().unwrap();
 
         let rendered = render_precheck_url(
             &config.input.encoders,
             config.request.raw_uri,
-            &wordlists,
+            &keywords,
             "TARGET",
             "a b",
             template,
@@ -408,16 +451,13 @@ mod tests {
             "TARGET",
         ]);
         let config = Config::try_from(cli).unwrap();
-        let wordlists = [WordlistData {
-            keyword: "TARGET".to_string(),
-            values: vec!["a b".to_string()],
-        }];
+        let keywords = ["TARGET".to_string()];
         let template = config.request.url.as_ref().unwrap();
 
         let rendered = render_precheck_url(
             &config.input.encoders,
             config.request.raw_uri,
-            &wordlists,
+            &keywords,
             "TARGET",
             "a b",
             template,
@@ -507,7 +547,9 @@ mod tests {
         }];
         let client = build_client(&config.request).unwrap();
 
-        let skipper = run(&config, &wordlists, client).await.unwrap();
+        let skipper = run(&config, &wordlists, client, RateLimiter::new(None))
+            .await
+            .unwrap();
         server.await.unwrap();
 
         assert!(skipper.is_none());
@@ -554,11 +596,14 @@ mod tests {
             .timeout(std::time::Duration::from_secs(2))
             .build()
             .unwrap();
-        probe_precheck_url(&client, &format!("http://{}/target", addr))
+        let limiter = RateLimiter::new(Some(20));
+        let started = std::time::Instant::now();
+        probe_precheck_url(&client, &format!("http://{}/target", addr), &limiter)
             .await
             .unwrap();
         server.await.unwrap();
 
         assert_eq!(*methods.lock().await, vec!["HEAD", "GET"]);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(40));
     }
 }

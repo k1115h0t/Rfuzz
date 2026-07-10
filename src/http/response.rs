@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use bytes::Bytes;
 use regex::Regex;
 use reqwest::header::LOCATION;
 
@@ -21,14 +20,15 @@ pub fn summarize(
     status: u16,
     version: reqwest::Version,
     headers: &reqwest::header::HeaderMap,
-    body: Bytes,
+    body: Vec<u8>,
     body_truncated: bool,
     body_preview_bytes: usize,
     elapsed_ms: u128,
 ) -> ResponseSummary {
     let size = body.len();
     let body_hash = fnv1a64(&body);
-    let body_text = String::from_utf8_lossy(&body).to_string();
+    let body_text = String::from_utf8(body)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
     let words = body_text.split_whitespace().count();
     let lines = if body_text.is_empty() {
         0
@@ -75,17 +75,20 @@ impl ResponseSummary {
     }
 
     pub fn raw_response(&mut self) -> &str {
-        if self.raw.is_none() {
-            self.raw = Some(build_raw_response(
-                self.version,
-                self.signature.status,
-                &self.headers,
-                &self.body_text,
-                self.body_truncated,
-                self.body_preview_bytes,
-            ));
-        }
+        self.ensure_raw_response();
         self.raw.as_deref().unwrap_or_default()
+    }
+
+    pub fn matcher_view(&mut self, include_raw: bool) -> (&ResponseSignature, &str) {
+        if include_raw {
+            self.ensure_raw_response();
+        }
+        let response_text = if include_raw {
+            self.raw.as_deref().unwrap_or_default()
+        } else {
+            ""
+        };
+        (&self.signature, response_text)
     }
 
     pub fn header_text(&self) -> String {
@@ -97,6 +100,19 @@ impl ResponseSummary {
     pub fn ensure_title(&mut self) {
         if self.signature.title.is_none() {
             self.signature.title = extract_title(&self.body_text);
+        }
+    }
+
+    fn ensure_raw_response(&mut self) {
+        if self.raw.is_none() {
+            self.raw = Some(build_raw_response(
+                self.version,
+                self.signature.status,
+                &self.headers,
+                &self.body_text,
+                self.body_truncated,
+                self.body_preview_bytes,
+            ));
         }
     }
 }
@@ -189,7 +205,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
     use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
 
     use super::summarize;
@@ -203,7 +218,7 @@ mod tests {
             200,
             reqwest::Version::HTTP_11,
             &headers,
-            Bytes::from_static(b"ok"),
+            b"ok".to_vec(),
             false,
             4096,
             10,
@@ -221,7 +236,7 @@ mod tests {
             200,
             reqwest::Version::HTTP_2,
             &headers,
-            Bytes::from_static(b"abcdef"),
+            b"abcdef".to_vec(),
             true,
             3,
             10,
@@ -244,7 +259,7 @@ mod tests {
             200,
             reqwest::Version::HTTP_11,
             &headers,
-            Bytes::from_static(b"body"),
+            b"body".to_vec(),
             false,
             4096,
             10,
@@ -255,5 +270,58 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 200\r\n"));
         assert!(head.contains("Set-Cookie: session_id=abc\r\n"));
         assert!(!head.contains("body"));
+    }
+
+    #[test]
+    fn summarize_reuses_valid_utf8_body_allocation() {
+        let body = Vec::from(&b"a sufficiently large response body"[..]);
+        let body_ptr = body.as_ptr();
+
+        let response = summarize(
+            200,
+            reqwest::Version::HTTP_11,
+            &HeaderMap::new(),
+            body,
+            false,
+            4096,
+            10,
+        );
+
+        assert_eq!(response.body_text.as_ptr(), body_ptr);
+    }
+
+    #[test]
+    fn summarize_preserves_lossy_utf8_behavior_for_binary_bodies() {
+        let response = summarize(
+            200,
+            reqwest::Version::HTTP_11,
+            &HeaderMap::new(),
+            vec![b'a', 0xff, b'b'],
+            false,
+            4096,
+            10,
+        );
+
+        assert_eq!(response.signature.size, 3);
+        assert_eq!(response.body_text, "a\u{fffd}b");
+    }
+
+    #[test]
+    fn matcher_view_borrows_cached_raw_response() {
+        let mut response = summarize(
+            200,
+            reqwest::Version::HTTP_11,
+            &HeaderMap::new(),
+            b"body".to_vec(),
+            false,
+            4096,
+            10,
+        );
+
+        let (_, first) = response.matcher_view(true);
+        let first_ptr = first.as_ptr();
+        let (_, second) = response.matcher_view(true);
+
+        assert_eq!(second.as_ptr(), first_ptr);
     }
 }

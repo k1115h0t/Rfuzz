@@ -400,7 +400,7 @@ pub struct Cli {
     #[arg(
         long = "no-progress",
         default_value_t = false,
-        help = "禁用进度条 / Disable progress bar"
+        help = "禁用预检查和主任务进度条 / Disable precheck and main progress bars"
     )]
     pub no_progress: bool,
 
