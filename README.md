@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.3-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
