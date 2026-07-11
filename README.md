@@ -9,7 +9,7 @@
 A conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -398,7 +398,9 @@ When a response matches, console output shows the matched combination, final ren
 [MATCH] PASS=admin,URLFUZZ=https://example.com,USER=alice -> https://example.com/login [Status: 200, Size: 12, Words: 2, Lines: 1, Time: 35ms]
 ```
 
-If `-o` writes JSONL, CSV, or console output to a file, `rfuzz` still mirrors a concise `[MATCH]` line to `stderr` so matches are visible during the run. Silent mode (`-s`) still prints URLs only.
+If `-o` writes JSONL, CSV, or console output to a file, `rfuzz` still mirrors a concise `[MATCH]` line to `stderr` so matches are visible during the run. When progress bars are enabled, match lines are printed through the progress renderer so they are not overwritten by dynamic updates. Silent mode (`-s`) still prints URLs only.
+
+Output files are flushed after each matching record, so JSONL and CSV results are usable while the scan is still running, for example with `tail -f result.jsonl`.
 
 Disable progress:
 

@@ -22,6 +22,7 @@ impl ResultWriter for ConsoleWriter {
         _raw: Option<&super::RawExchange>,
     ) -> Result<()> {
         writeln!(self.writer, "{}", format_record(record, self.silent))?;
+        self.writer.flush()?;
         Ok(())
     }
 

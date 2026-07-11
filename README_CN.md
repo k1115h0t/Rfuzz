@@ -9,7 +9,7 @@
 English: a conservative Rust web fuzzer for authorized testing, with familiar ffuf-style workflows.
 
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
 
 </div>
@@ -398,7 +398,9 @@ done/total | percent | matched | errors | skipped | err | ETA
 [MATCH] PASS=admin,URLFUZZ=https://example.com,USER=alice -> https://example.com/login [Status: 200, Size: 12, Words: 2, Lines: 1, Time: 35ms]
 ```
 
-如果 `-o` 把 JSONL、CSV 或 console 输出写入文件，`rfuzz` 仍会把简洁的 `[MATCH]` 命中行同步打印到 `stderr`，方便运行时直接看到命中结果。静默模式（`-s`）仍保持只输出 URL。
+如果 `-o` 把 JSONL、CSV 或 console 输出写入文件，`rfuzz` 仍会把简洁的 `[MATCH]` 命中行同步打印到 `stderr`，方便运行时直接看到命中结果。开启进度条时，命中行会通过进度条渲染器安全打印，不会被动态刷新覆盖。静默模式（`-s`）仍保持只输出 URL。
+
+输出文件会在每条命中记录写入后立即 flush，因此扫描尚未结束时也可以读取 JSONL/CSV 结果，例如使用 `tail -f result.jsonl`。
 
 关闭进度条：
 

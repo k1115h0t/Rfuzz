@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -282,6 +283,50 @@ pub struct ProgressReporter {
     inner: Arc<ProgressReporterInner>,
 }
 
+struct ProgressLineWriter {
+    progress: ProgressReporter,
+    buffer: Vec<u8>,
+}
+
+impl ProgressLineWriter {
+    fn new(progress: ProgressReporter) -> Self {
+        Self {
+            progress,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn emit_line(&self, line: &[u8]) {
+        let line = String::from_utf8_lossy(line);
+        self.progress.println(line.as_ref());
+    }
+}
+
+impl Write for ProgressLineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = self.buffer.drain(..=pos).collect();
+            if line.ends_with(b"\n") {
+                line.pop();
+            }
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+            self.emit_line(&line);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let line = std::mem::take(&mut self.buffer);
+            self.emit_line(&line);
+        }
+        Ok(())
+    }
+}
+
 struct ProgressReporterInner {
     state: Mutex<ProgressState>,
     started: Instant,
@@ -427,6 +472,22 @@ impl ProgressReporter {
 
     pub fn record_stop_triggered(&self) {
         self.update(|state| state.record_stop_triggered());
+    }
+
+    pub fn line_writer(&self) -> Box<dyn Write + Send> {
+        if self.inner.bar.is_some() {
+            Box::new(ProgressLineWriter::new(self.clone()))
+        } else {
+            Box::new(BufWriter::new(io::stderr()))
+        }
+    }
+
+    pub fn println(&self, line: &str) {
+        if let Some(bar) = &self.inner.bar {
+            bar.suspend(|| eprintln!("{line}"));
+        } else {
+            eprintln!("{line}");
+        }
     }
 
     pub fn snapshot(&self) -> ProgressSnapshot {

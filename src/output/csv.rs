@@ -43,6 +43,7 @@ impl ResultWriter for CsvResultWriter {
             time_ms: record.time_ms,
             input: &record.input,
         })?;
+        self.writer.flush()?;
         Ok(())
     }
 

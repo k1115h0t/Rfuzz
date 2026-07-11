@@ -84,12 +84,15 @@ pub async fn run(config: Config) -> Result<()> {
     } else {
         None
     };
-    let writer = Arc::new(Mutex::new(build_writer(&config.output)?));
+    let progress = ProgressReporter::new(total_cases, config.output.progress);
+    let writer = Arc::new(Mutex::new(build_writer(
+        &config.output,
+        Some(progress.line_writer()),
+    )?));
     let error_logger = Arc::new(Mutex::new(build_error_logger(
         config.output.error_log.as_deref(),
     )?));
     let matcher = Arc::new(config.matcher.clone());
-    let progress = ProgressReporter::new(total_cases, config.output.progress);
     if precheck_skipped > 0 {
         progress.record_skipped_by(precheck_skipped);
     }

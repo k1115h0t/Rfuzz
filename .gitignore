@@ -1,5 +1,15 @@
 /target/
 *.pdb
 /superpowers/
+/.agents/
+/.codex/
+/.codegraph/
+**/.codegraph/
+/.github/
 
 /UX_IMPROVEMENT_PLAN.md
+/rust_web_fuzzer_technical_design_cn.md
+result*.jsonl
+*_result.jsonl
+request_errors.jsonl
+summary.json

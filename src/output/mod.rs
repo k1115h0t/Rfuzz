@@ -66,7 +66,10 @@ pub trait ResultWriter: Send {
     }
 }
 
-pub fn build_writer(config: &OutputConfig) -> Result<Box<dyn ResultWriter>> {
+pub fn build_writer(
+    config: &OutputConfig,
+    mirror_writer: Option<Box<dyn Write + Send>>,
+) -> Result<Box<dyn ResultWriter>> {
     let writer: Box<dyn ResultWriter> = match config.format {
         OutputFormat::Console => Box::new(console::ConsoleWriter::new(
             open_text_writer(config.path.as_deref())?,
@@ -84,7 +87,7 @@ pub fn build_writer(config: &OutputConfig) -> Result<Box<dyn ResultWriter>> {
         Ok(Box::new(MirroredResultWriter::new(
             writer,
             Box::new(console::ConsoleWriter::new(
-                open_stderr_writer(),
+                mirror_writer.unwrap_or_else(open_stderr_writer),
                 config.silent,
             )),
         )))
@@ -127,5 +130,81 @@ impl ResultWriter for MirroredResultWriter {
         self.primary.flush()?;
         self.mirror.flush()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::config::{OutputConfig, OutputFormat};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("mirror buffer poisoned").extend(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_output_mirrors_matches_to_injected_writer() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let output_path = std::env::temp_dir().join(format!("rfuzz-mirror-test-{unique}.jsonl"));
+        let mirror = Arc::new(Mutex::new(Vec::new()));
+        let config = OutputConfig {
+            path: Some(output_path.to_string_lossy().into_owned()),
+            format: OutputFormat::Jsonl,
+            silent: false,
+            output_directory: None,
+            error_log: None,
+            summary_json: None,
+            progress: true,
+        };
+        let record = OutputRecord::new(
+            "https://example.com/login".to_string(),
+            "PASS=admin,USER=alice".to_string(),
+            BTreeMap::from([
+                ("PASS".to_string(), "admin".to_string()),
+                ("USER".to_string(), "alice".to_string()),
+            ]),
+            &ResponseSignature {
+                status: 200,
+                size: 12,
+                words: 2,
+                lines: 1,
+                elapsed_ms: 35,
+                location: None,
+                title: None,
+                body_hash: 42,
+            },
+        );
+
+        let mut writer =
+            build_writer(&config, Some(Box::new(SharedBuffer(Arc::clone(&mirror))))).unwrap();
+        writer.write_record(&record, None).unwrap();
+        writer.flush().unwrap();
+
+        let mirrored = String::from_utf8(mirror.lock().unwrap().clone()).unwrap();
+        assert!(mirrored
+            .contains("[MATCH] PASS=admin,USER=alice -> https://example.com/login [Status: 200"));
+
+        let file_output = std::fs::read_to_string(&output_path).unwrap();
+        assert!(file_output.contains("\"url\":\"https://example.com/login\""));
+        let _ = std::fs::remove_file(output_path);
     }
 }
